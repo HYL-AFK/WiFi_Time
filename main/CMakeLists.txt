@@ -1,0 +1,30 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "common/app_config.c"
+        "common/time_snapshot.c"
+        "common/weather_snapshot.c"
+        "drivers/wifi_manager.c"
+        "drivers/ds3231.c"
+        "drivers/ws2812_matrix.c"
+        "middle/ble_provision.c"
+        "middle/blufi_security.c"
+        "app/app_rtc.c"
+        "app/app_time.c"
+        "app/app_weather.c"
+        "app/app_display.c"
+    INCLUDE_DIRS "." "app" "common" "drivers" "middle"
+    REQUIRES
+        bt
+        esp_driver_i2c
+        esp_driver_gpio
+        esp_driver_rmt
+        esp_event
+        esp_http_client
+        esp_netif
+        esp_wifi
+        json
+        led_strip
+        nvs_flash
+        mbedtls
+)
