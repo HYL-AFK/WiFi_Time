@@ -8,6 +8,7 @@
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
 
+#include "common/app_log.h"
 #include "common/time_snapshot.h"
 #include "common/weather_snapshot.h"
 #include "drivers/ws2812_matrix.h"
@@ -18,19 +19,26 @@
 #define CLOCK_Y 0
 #define CLOCK_W 13
 #define CLOCK_H 5
+#define CLOCK_HOUR_TENS_X 0
+#define CLOCK_HOUR_ONES_X 3
+#define CLOCK_COLON_X 6
+#define CLOCK_MINUTE_TENS_X 7
+#define CLOCK_MINUTE_ONES_X 10
 
 #define WEATHER_X 0
-#define WEATHER_Y 10
-#define WEATHER_W 6
-#define WEATHER_H 6
+#define WEATHER_Y 10 /* 天气图标占用左下角 5x5，最后一行 y=15 留空。 */
+#define WEATHER_W 5
+#define WEATHER_H 5
 
-#define DATA_X 7
-#define DATA_Y 10
-#define DATA_W 6
-#define DATA_H 5
+#define TEMP_TENS_X 7
+#define TEMP_ONES_X 10
+#define TEMP_Y 10
+
+#define NEGATIVE_X 6
+#define NEGATIVE_Y 12
 
 #define DEGREE_X 13
-#define DEGREE_Y 11
+#define DEGREE_Y 9
 #define DEGREE_W 2
 #define DEGREE_H 2
 
@@ -38,39 +46,37 @@
 #define SECONDS_Y 0
 #define SECONDS_H 15
 
-#define MATRIX_BRIGHTNESS 25
+#define MATRIX_BRIGHTNESS 35
+#define DISPLAY_WHITE 70
+#define DISPLAY_REFRESH_PERIOD_MS 50
 #define FLOW_FRAME_COUNT 32
 #define FLOW_FRAME_DELAY_MS 25
 
 static EventGroupHandle_t s_events;
 static int64_t s_last_flow_minute = -1;
+static const char *TAG = "app_display";
 
-/* 3×5 字模正好填满 13×5 的 HH:MM 区域。 */
+/* 2×5 字模为相邻数字留出空列，避免时间和温度字形粘连。 */
+/* 时间和温度使用标准 3x5 数字，保证小尺寸下仍可辨认。 */
 static const uint8_t s_digit_3x5[10][5] = {
     {0x07, 0x05, 0x05, 0x05, 0x07},
-    {0x02, 0x06, 0x02, 0x02, 0x07},
+    {0x02, 0x02, 0x02, 0x02, 0x02},
     {0x07, 0x01, 0x07, 0x04, 0x07},
     {0x07, 0x01, 0x07, 0x01, 0x07},
     {0x05, 0x05, 0x07, 0x01, 0x01},
     {0x07, 0x04, 0x07, 0x01, 0x07},
     {0x07, 0x04, 0x07, 0x05, 0x07},
-    {0x07, 0x01, 0x02, 0x02, 0x02},
+    {0x07, 0x01, 0x01, 0x01, 0x01},
     {0x07, 0x05, 0x07, 0x05, 0x07},
     {0x07, 0x05, 0x07, 0x01, 0x07},
 };
 
-/* 温度区域使用 3×3 紧凑数字，底部两行显示湿度比例条。 */
-static const uint8_t s_digit_3x3[10][3] = {
-    {0x07, 0x05, 0x07}, {0x02, 0x06, 0x02}, {0x07, 0x01, 0x07},
-    {0x07, 0x03, 0x07}, {0x05, 0x07, 0x01}, {0x07, 0x06, 0x07},
-    {0x06, 0x04, 0x07}, {0x07, 0x01, 0x01}, {0x07, 0x07, 0x07},
-    {0x07, 0x03, 0x03},
-};
-
-static const uint8_t s_weather_clear[6] = {0x04, 0x11, 0x0e, 0x1c, 0x0e, 0x11};
-static const uint8_t s_weather_cloud[6] = {0x00, 0x0c, 0x1e, 0x3f, 0x3f, 0x00};
-static const uint8_t s_weather_rain[6] = {0x0c, 0x1e, 0x3f, 0x15, 0x2a, 0x15};
-static const uint8_t s_weather_snow[6] = {0x08, 0x2a, 0x1c, 0x2a, 0x08, 0x00};
+/* 每个天气图标都是 5x5 位图，最高位对应图标最左列。 */
+static const uint8_t s_weather_clear[WEATHER_H] = {0x04, 0x11, 0x0e, 0x11, 0x04}; /* 晴天 */
+static const uint8_t s_weather_cloud[WEATHER_H] = {0x00, 0x0e, 0x1f, 0x1f, 0x00}; /* 多云/雾 */
+static const uint8_t s_weather_rain[WEATHER_H] = {0x04, 0x0e, 0x1f, 0x0a, 0x15}; /* 降雨 */
+static const uint8_t s_weather_snow[WEATHER_H] = {0x04, 0x15, 0x0e, 0x15, 0x04}; /* 降雪 */
+static const uint8_t s_weather_thunder[WEATHER_H] = {0x04, 0x0e, 0x1f, 0x04, 0x08}; /* 雷雨 */
 
 static void set_rect(uint8_t x, uint8_t y, uint8_t width, uint8_t height,
                      uint8_t r, uint8_t g, uint8_t b)
@@ -97,41 +103,32 @@ static void draw_digit_3x5(uint8_t x, uint8_t y, uint8_t digit,
     }
 }
 
-static void draw_digit_3x3(uint8_t x, uint8_t y, uint8_t digit,
-                           uint8_t r, uint8_t g, uint8_t b)
-{
-    if (digit > 9) return;
-    for (uint8_t row = 0; row < 3; ++row) {
-        for (uint8_t col = 0; col < 3; ++col) {
-            if (s_digit_3x3[digit][row] & (1u << (2u - col))) {
-                ws2812_matrix_set_pixel(x + col, y + row, r, g, b);
-            }
-        }
-    }
-}
-
 static void draw_clock(const struct tm *local_time)
 {
     const uint8_t hour = (uint8_t)local_time->tm_hour;
     const uint8_t minute = (uint8_t)local_time->tm_min;
-    const uint8_t r = 0;
-    const uint8_t g = 25;
-    const uint8_t b = 90;
+    const uint8_t r = DISPLAY_WHITE;
+    const uint8_t g = DISPLAY_WHITE;
+    const uint8_t b = DISPLAY_WHITE;
 
-    draw_digit_3x5(CLOCK_X, CLOCK_Y, hour / 10, r, g, b);
-    draw_digit_3x5(CLOCK_X + 3, CLOCK_Y, hour % 10, r, g, b);
-    ws2812_matrix_set_pixel(6, 1, r, g, b);
-    ws2812_matrix_set_pixel(6, 3, r, g, b);
-    draw_digit_3x5(CLOCK_X + 7, CLOCK_Y, minute / 10, r, g, b);
-    draw_digit_3x5(CLOCK_X + 10, CLOCK_Y, minute % 10, r, g, b);
+    draw_digit_3x5(CLOCK_HOUR_TENS_X, CLOCK_Y, hour / 10, r, g, b);
+    draw_digit_3x5(CLOCK_HOUR_ONES_X, CLOCK_Y, hour % 10, r, g, b);
+    ws2812_matrix_set_pixel(CLOCK_COLON_X, CLOCK_Y + 1, r, g, b);
+    ws2812_matrix_set_pixel(CLOCK_COLON_X, CLOCK_Y + 3, r, g, b);
+    draw_digit_3x5(CLOCK_MINUTE_TENS_X, CLOCK_Y, minute / 10, r, g, b);
+    draw_digit_3x5(CLOCK_MINUTE_ONES_X, CLOCK_Y, minute % 10, r, g, b);
 }
 
 static const uint8_t *weather_glyph(int weather_code)
 {
     if (weather_code == 0) return s_weather_clear;
-    if (weather_code >= 71 && weather_code <= 86) return s_weather_snow;
+    if ((weather_code >= 1 && weather_code <= 3) ||
+        weather_code == 45 || weather_code == 48) return s_weather_cloud;
     if ((weather_code >= 51 && weather_code <= 67) ||
-        (weather_code >= 80 && weather_code <= 99)) return s_weather_rain;
+        (weather_code >= 80 && weather_code <= 82)) return s_weather_rain;
+    if ((weather_code >= 71 && weather_code <= 77) ||
+        (weather_code >= 85 && weather_code <= 86)) return s_weather_snow;
+    if (weather_code >= 95 && weather_code <= 99) return s_weather_thunder;
     return s_weather_cloud;
 }
 
@@ -141,42 +138,62 @@ static void draw_weather(const weather_snapshot_t *weather)
     const uint8_t *glyph = weather_glyph(weather->weather_code);
     for (uint8_t row = 0; row < WEATHER_H; ++row) {
         for (uint8_t col = 0; col < WEATHER_W; ++col) {
-            if (glyph[row] & (1u << (5u - col))) {
-                ws2812_matrix_set_pixel(WEATHER_X + col, WEATHER_Y + row, 55, 25, 5);
+            if (glyph[row] & (1u << (WEATHER_W - 1u - col))) {
+                ws2812_matrix_set_pixel(WEATHER_X + col, WEATHER_Y + row,
+                                        DISPLAY_WHITE, DISPLAY_WHITE, DISPLAY_WHITE);
             }
         }
     }
 }
 
-static void draw_temperature_humidity(const weather_snapshot_t *weather)
+static void draw_temperature(const weather_snapshot_t *weather)
 {
-    if (!weather->valid) return;
+    if (!weather->temperature_valid) return;
 
     int temperature = (int)(weather->temperature_c >= 0.0f ?
                             weather->temperature_c + 0.5f :
                             weather->temperature_c - 0.5f);
-    if (temperature < 0) temperature = 0;
+    const bool negative = temperature < 0;
+    if (negative) temperature = -temperature;
     if (temperature > 99) temperature = 99;
-    draw_digit_3x3(DATA_X, DATA_Y, (uint8_t)(temperature / 10), 80, 18, 3);
-    draw_digit_3x3(DATA_X + 3, DATA_Y, (uint8_t)(temperature % 10), 80, 18, 3);
 
-    int humidity = weather->humidity;
-    if (humidity < 0) humidity = 0;
-    if (humidity > 100) humidity = 100;
-    uint8_t width = (uint8_t)((humidity * DATA_W + 99) / 100);
-    set_rect(DATA_X, DATA_Y + 3, width, 2, 20, 60, 20);
+    if (negative) {
+        ws2812_matrix_set_pixel(NEGATIVE_X, NEGATIVE_Y,
+                                DISPLAY_WHITE, DISPLAY_WHITE, DISPLAY_WHITE);
+    }
+    draw_digit_3x5(TEMP_TENS_X, TEMP_Y, (uint8_t)(temperature / 10),
+                   DISPLAY_WHITE, DISPLAY_WHITE, DISPLAY_WHITE);
+    draw_digit_3x5(TEMP_ONES_X, TEMP_Y, (uint8_t)(temperature % 10),
+                   DISPLAY_WHITE, DISPLAY_WHITE, DISPLAY_WHITE);
 
-    /* 度号必须是实心 2×2，起点固定为 (13,11)。 */
-    set_rect(DEGREE_X, DEGREE_Y, DEGREE_W, DEGREE_H, 80, 18, 3);
+    /* 度号属于温度显示，即使尚未联网使用 RTC 温度时也必须显示。 */
+    set_rect(DEGREE_X, DEGREE_Y, DEGREE_W, DEGREE_H,
+             DISPLAY_WHITE, DISPLAY_WHITE, DISPLAY_WHITE);
 }
 
 static void draw_seconds(uint8_t seconds)
 {
-    const uint8_t lit = (uint8_t)(1u + ((seconds % 60u) * SECONDS_H) / 60u);
+    const uint8_t lit = (uint8_t)((seconds % SECONDS_H) + 1u);
     for (uint8_t row = 0; row < lit; ++row) {
         ws2812_matrix_set_pixel(SECONDS_X, SECONDS_Y + SECONDS_H - 1u - row,
-                                70, 18, 10);
+                                DISPLAY_WHITE, DISPLAY_WHITE, DISPLAY_WHITE);
     }
+}
+
+/* WS2812 发送失败时只重试一次，避免短暂总线错误留下半帧数据。 */
+static esp_err_t show_frame_with_retry(void)
+{
+    esp_err_t err = ws2812_matrix_show(MATRIX_BRIGHTNESS);
+    if (err == ESP_OK) return ESP_OK;
+
+    APP_LOG_ERR(TAG, err, "WS2812 refresh failed, retrying");
+    vTaskDelay(pdMS_TO_TICKS(1));
+
+    err = ws2812_matrix_show(MATRIX_BRIGHTNESS);
+    if (err != ESP_OK) {
+        APP_LOG_ERR(TAG, err, "WS2812 refresh retry failed");
+    }
+    return err;
 }
 
 static void render_normal(void)
@@ -196,11 +213,10 @@ static void render_normal(void)
 
     ws2812_matrix_clear();
     draw_clock(&time_snapshot.local_time);
-    set_rect(0, 6, 13, 4, 3, 8, 18);
     draw_weather(&weather);
-    draw_temperature_humidity(&weather);
+    draw_temperature(&weather);
     draw_seconds((uint8_t)time_snapshot.local_time.tm_sec);
-    ws2812_matrix_show(MATRIX_BRIGHTNESS);
+    (void)show_frame_with_retry();
 }
 
 static bool flow_animation_due(const time_snapshot_t *snapshot)
@@ -223,12 +239,12 @@ static void flow_animation(void)
                 uint8_t band = (uint8_t)((x + y + phase) & 0x0f);
                 if (band < 4) {
                     uint8_t level = (uint8_t)(4 - band);
-                    ws2812_matrix_set_pixel(x, y, (uint8_t)(level * 20),
-                                            (uint8_t)(level * 8), (uint8_t)(level * 2));
+                    uint8_t intensity = (uint8_t)((level * DISPLAY_WHITE) / 4u);
+                    ws2812_matrix_set_pixel(x, y, intensity, intensity, intensity);
                 }
             }
         }
-        ws2812_matrix_show(MATRIX_BRIGHTNESS);
+        (void)show_frame_with_retry();
         vTaskDelay(pdMS_TO_TICKS(FLOW_FRAME_DELAY_MS));
     }
 }
@@ -238,7 +254,7 @@ static void display_task(void *arg)
     (void)arg;
     for (;;) {
         xEventGroupWaitBits(s_events, DISPLAY_REFRESH, pdTRUE, pdFALSE,
-                            pdMS_TO_TICKS(1000));
+                            pdMS_TO_TICKS(DISPLAY_REFRESH_PERIOD_MS));
 
         time_snapshot_t snapshot = {0};
         time_snapshot_get(&snapshot);
@@ -261,6 +277,11 @@ esp_err_t app_display_init(void)
     if (!s_events) return ESP_ERR_NO_MEM;
 
     esp_err_t err = ws2812_matrix_init();
+    if (err != ESP_OK) return err;
+
+    /* 先发送全黑帧，清除灯珠上电后的不确定状态。 */
+    ws2812_matrix_clear();
+    err = show_frame_with_retry();
     if (err != ESP_OK) return err;
 
     if (xTaskCreate(display_task, "display_task", 4096, NULL, 6, NULL) != pdPASS) {

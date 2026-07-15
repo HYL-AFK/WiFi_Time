@@ -16,6 +16,7 @@ idf_component_register(
     INCLUDE_DIRS "." "app" "common" "drivers" "middle"
     REQUIRES
         bt
+        driver
         esp_driver_i2c
         esp_driver_gpio
         esp_driver_rmt

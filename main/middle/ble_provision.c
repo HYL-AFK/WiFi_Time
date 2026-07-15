@@ -243,7 +243,8 @@ static void blufi_wifi_event_handler(void *arg,
                 s_last_sta_reason = event->reason;
                 s_last_sta_rssi = event->rssi;
             }
-            if (!wifi_manager_is_sta_connected()) {
+            if (!wifi_manager_is_sta_connected() &&
+                s_last_sta_reason != WIFI_REASON_ASSOC_LEAVE) {
                 s_sta_connecting = false;
             }
             APP_LOGW(TAG, "BluFi STA disconnected reason=%u", s_last_sta_reason);
@@ -322,7 +323,6 @@ static void blufi_apply_pending_sta_config(void)
     s_last_sta_reason = 0xff;
     s_last_sta_rssi = -128;
     wifi_manager_enable_sta_reconnect(true);
-    esp_wifi_disconnect();
     wifi_manager_connect_specific_sta(&s_cfg,
                                       s_pending_sta_ssid,
                                       s_pending_sta_pass,
@@ -383,8 +383,7 @@ static void blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_
     case ESP_BLUFI_EVENT_REQ_DISCONNECT_FROM_AP:
         APP_LOGI(TAG, "BluFi request disconnect from AP");
         s_sta_connecting = false;
-        wifi_manager_enable_sta_reconnect(false);
-        esp_wifi_disconnect();
+        wifi_manager_disconnect_sta();
         blufi_send_wifi_report();
         break;
 
@@ -419,10 +418,6 @@ static void blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_
         memcpy(s_pending_sta_pass, param->sta_passwd.passwd, (size_t)param->sta_passwd.passwd_len);
         s_pending_sta_pass[param->sta_passwd.passwd_len] = '\0';
         APP_LOGI(TAG, "BluFi recv STA password len=%d", param->sta_passwd.passwd_len);
-        APP_LOG_HEX(TAG,
-                    "BluFi STA password raw bytes",
-                    param->sta_passwd.passwd,
-                    (size_t)param->sta_passwd.passwd_len);
         break;
 
     case ESP_BLUFI_EVENT_RECV_SOFTAP_SSID:

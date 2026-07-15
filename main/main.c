@@ -3,6 +3,8 @@
 #include "nvs_flash.h"
 #include "app_log.h"
 #include "app_config.h"
+#include "common/time_snapshot.h"
+#include "common/weather_snapshot.h"
 #include "app/app_rtc.h"
 #include "app/app_time.h"
 #include "app/app_weather.h"
@@ -14,9 +16,11 @@ static const char *TAG = "witime";
 
 static void wifi_changed(void)
 {
-    app_time_notify_network();
-    app_weather_notify_network();
     app_display_request_refresh();
+    if (wifi_manager_is_sta_connected()) {
+        app_time_notify_network();
+        app_weather_notify_network();
+    }
 }
 
 static void apply_wifi_cfg(const app_config_t *cfg)
@@ -40,6 +44,8 @@ void app_main(void)
     app_config_t cfg;
     app_config_load(&cfg);
 
+    ESP_ERROR_CHECK(time_snapshot_init());
+    ESP_ERROR_CHECK(weather_snapshot_init());
     ESP_ERROR_CHECK(app_time_init());
     ESP_ERROR_CHECK(app_rtc_init());
     ESP_ERROR_CHECK(app_display_init());

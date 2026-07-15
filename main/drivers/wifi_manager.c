@@ -1,6 +1,8 @@
 #include "wifi_manager.h"
 
+#include <inttypes.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -36,10 +38,23 @@ static const char *TAG = "wifi_manager";
 #define WIFI_RSSI_SWITCH_MARGIN_DB     (8)
 #define WIFI_RECONNECT_DELAY_MS        (2000)
 
+typedef enum {
+    WIFI_STA_STATE_IDLE = 0,
+    WIFI_STA_STATE_CONNECTING,
+    WIFI_STA_STATE_WAIT_IP,
+    WIFI_STA_STATE_ONLINE,
+    WIFI_STA_STATE_SWITCHING,
+} wifi_sta_state_t;
+
 static bool s_inited = false;
 static bool s_sta_reconnect_enabled = true;
 static bool s_wifi_running = false;
 static bool s_sta_connected = false;
+static wifi_sta_state_t s_sta_state = WIFI_STA_STATE_IDLE;
+static portMUX_TYPE s_sta_state_lock = portMUX_INITIALIZER_UNLOCKED;
+static wifi_config_t s_pending_sta_config;
+static bool s_pending_sta_config_valid;
+static uint32_t s_connect_generation;
 static bool s_ap_started = false;
 static esp_netif_t *s_sta_netif = NULL;
 static esp_netif_t *s_ap_netif = NULL;
@@ -61,10 +76,48 @@ static wifi_ap_record_t s_last_connected_scan_ap;
 static TaskHandle_t s_reconnect_task = NULL;
 
 static void update_ap_ip_cache(void);
+static void schedule_sta_reconnect(void);
+
+static const char *wifi_sta_state_to_str(wifi_sta_state_t state)
+{
+    switch (state) {
+    case WIFI_STA_STATE_IDLE:
+        return "IDLE";
+    case WIFI_STA_STATE_CONNECTING:
+        return "CONNECTING";
+    case WIFI_STA_STATE_WAIT_IP:
+        return "WAIT_IP";
+    case WIFI_STA_STATE_ONLINE:
+        return "ONLINE";
+    case WIFI_STA_STATE_SWITCHING:
+        return "SWITCHING";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+static wifi_sta_state_t get_sta_state(void)
+{
+    portENTER_CRITICAL(&s_sta_state_lock);
+    wifi_sta_state_t state = s_sta_state;
+    portEXIT_CRITICAL(&s_sta_state_lock);
+    return state;
+}
+
+static void set_sta_state(wifi_sta_state_t state)
+{
+    portENTER_CRITICAL(&s_sta_state_lock);
+    s_sta_state = state;
+    portEXIT_CRITICAL(&s_sta_state_lock);
+}
 
 static const char *wifi_disconnect_reason_to_str(int reason)
 {
     switch (reason) {
+    case WIFI_REASON_AUTH_EXPIRE:
+        return "AUTH_EXPIRE";
+    case WIFI_REASON_ASSOC_LEAVE:
+        return "ASSOC_LEAVE";
     case WIFI_REASON_DISASSOC_DUE_TO_INACTIVITY:
         return "DISASSOC_DUE_TO_INACTIVITY";
     case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
@@ -95,6 +148,10 @@ static const char *wifi_disconnect_reason_to_str(int reason)
 static const char *wifi_disconnect_reason_hint(int reason)
 {
     switch (reason) {
+    case WIFI_REASON_AUTH_EXPIRE:
+        return "authentication expired during connection";
+    case WIFI_REASON_ASSOC_LEAVE:
+        return "station intentionally left the previous AP";
     case WIFI_REASON_DISASSOC_DUE_TO_INACTIVITY:
         return "AP dropped link or signal unstable";
     case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
@@ -224,11 +281,18 @@ static void log_sta_network_info(const ip_event_got_ip_t *event)
 
 static void sta_reconnect_task(void *arg)
 {
-    (void)arg;
+    const uint32_t generation = (uint32_t)(uintptr_t)arg;
 
     vTaskDelay(pdMS_TO_TICKS(WIFI_RECONNECT_DELAY_MS));
 
-    if (s_sta_reconnect_enabled) {
+    const wifi_sta_state_t state = get_sta_state();
+    if (generation != s_connect_generation || state != WIFI_STA_STATE_IDLE) {
+        APP_LOGI(TAG,
+                 "discard stale reconnect: task_gen=%" PRIu32 " current_gen=%" PRIu32 " state=%s",
+                 generation,
+                 s_connect_generation,
+                 wifi_sta_state_to_str(state));
+    } else if (s_sta_reconnect_enabled) {
         if (s_saved_cfg.has_wifi && s_saved_cfg.wifi_count > 0) {
             APP_LOGI(TAG, "reconnect path: delayed re-evaluate saved wifi profiles");
             wifi_manager_connect_sta(&s_saved_cfg);
@@ -239,6 +303,12 @@ static void sta_reconnect_task(void *arg)
     }
 
     s_reconnect_task = NULL;
+
+    if (generation != s_connect_generation &&
+        s_sta_reconnect_enabled &&
+        get_sta_state() == WIFI_STA_STATE_IDLE) {
+        schedule_sta_reconnect();
+    }
     vTaskDelete(NULL);
 }
 
@@ -252,7 +322,7 @@ static void schedule_sta_reconnect(void)
     BaseType_t ok = xTaskCreate(sta_reconnect_task,
                                 "sta_reconn",
                                 4096,
-                                NULL,
+                                (void *)(uintptr_t)s_connect_generation,
                                 5,
                                 &s_reconnect_task);
     if (ok != pdPASS) {
@@ -332,6 +402,69 @@ static bool refresh_sta_runtime_info(wifi_ap_record_t *ap)
     return true;
 }
 
+static esp_err_t start_sta_with_config(const wifi_config_t *sta_cfg,
+                                       const char *context)
+{
+    if (sta_cfg == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    wifi_sta_state_t state = get_sta_state();
+    if (state != WIFI_STA_STATE_IDLE) {
+        APP_LOGW(TAG, "skip STA config while state=%s, context=%s",
+                 wifi_sta_state_to_str(state), context);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, sta_cfg);
+    if (err != ESP_OK) {
+        APP_LOG_ERR(TAG, err, "set STA config failed, context=%s state=%s",
+                    context, wifi_sta_state_to_str(get_sta_state()));
+        return err;
+    }
+
+    set_sta_state(WIFI_STA_STATE_CONNECTING);
+    err = esp_wifi_connect();
+    if (err != ESP_OK) {
+        set_sta_state(WIFI_STA_STATE_IDLE);
+        APP_LOG_ERR(TAG, err, "start STA connect failed, context=%s", context);
+        return err;
+    }
+
+    APP_LOGI(TAG, "STA connect started, context=%s generation=%" PRIu32,
+             context, s_connect_generation);
+    return ESP_OK;
+}
+
+static bool take_pending_sta_config(wifi_config_t *out)
+{
+    bool available = false;
+    portENTER_CRITICAL(&s_sta_state_lock);
+    if (s_pending_sta_config_valid) {
+        *out = s_pending_sta_config;
+        s_pending_sta_config_valid = false;
+        available = true;
+    }
+    portEXIT_CRITICAL(&s_sta_state_lock);
+    return available;
+}
+
+static bool apply_pending_sta_config(void)
+{
+    wifi_config_t sta_cfg = {0};
+    if (!take_pending_sta_config(&sta_cfg)) {
+        return false;
+    }
+
+    APP_LOGI(TAG, "apply pending STA config for SSID=%s",
+             (const char *)sta_cfg.sta.ssid);
+    esp_err_t err = start_sta_with_config(&sta_cfg, "pending BluFi config");
+    if (err != ESP_OK && s_sta_reconnect_enabled) {
+        schedule_sta_reconnect();
+    }
+    return true;
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     (void)arg;
@@ -339,7 +472,13 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
     {
         /* STA 驱动已启动，不代表已经连接路由器。 */
+        set_sta_state(WIFI_STA_STATE_IDLE);
         APP_LOGI(TAG, "STA start");
+    }
+    else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED)
+    {
+        set_sta_state(WIFI_STA_STATE_WAIT_IP);
+        APP_LOGI(TAG, "STA link connected, waiting for DHCP");
     }
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
     {
@@ -348,12 +487,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
          * 如果 s_sta_reconnect_enabled=true，则让 ESP-IDF 继续重连。
          */
         wifi_event_sta_disconnected_t *event = (wifi_event_sta_disconnected_t *)event_data;
-        APP_LOGW(TAG, "STA disconnected, reason=%d(%s), hint=%s, reconnect=%d, saved=%d",
+        const wifi_sta_state_t previous_state = get_sta_state();
+        APP_LOGW(TAG, "STA disconnected, previous_state=%s reason=%d(%s), hint=%s, reconnect=%d, saved=%d",
+                 wifi_sta_state_to_str(previous_state),
                  event != NULL ? event->reason : -1,
                  event != NULL ? wifi_disconnect_reason_to_str(event->reason) : "UNKNOWN",
                  event != NULL ? wifi_disconnect_reason_hint(event->reason) : "-",
                  s_sta_reconnect_enabled ? 1 : 0,
                  (s_saved_cfg.has_wifi && s_saved_cfg.wifi_count > 0) ? 1 : 0);
+        set_sta_state(WIFI_STA_STATE_IDLE);
         s_sta_connected = false;
         s_sta_rssi = -127;
         s_sta_channel = 0;
@@ -361,7 +503,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         s_sta_ssid[0] = '\0';
         strlcpy(s_sta_ip_str, "0.0.0.0", sizeof(s_sta_ip_str));
         notify_status_changed();
-        if (s_sta_reconnect_enabled)
+        if (apply_pending_sta_config())
+        {
+            APP_LOGI(TAG, "intentional STA switch continues without delayed reconnect");
+        }
+        else if (s_sta_reconnect_enabled)
         {
             APP_LOGI(TAG, "STA reconnect scheduled in %d ms", WIFI_RECONNECT_DELAY_MS);
             schedule_sta_reconnect();
@@ -387,6 +533,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         /* STA 已经从上级路由器/手机热点拿到内网 IP，说明 STA 连接成功。 */
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         s_sta_connected = true;
+        set_sta_state(WIFI_STA_STATE_ONLINE);
         esp_ip4addr_ntoa(&event->ip_info.ip, s_sta_ip_str, sizeof(s_sta_ip_str));
         APP_LOGI(TAG, "STA got IP: %s", s_sta_ip_str);
         refresh_sta_runtime_info(NULL);
@@ -685,7 +832,7 @@ void wifi_manager_connect_specific_sta(const app_config_t *cfg,
     }
 
     APP_LOGI(TAG,
-             "connecting STA directly to SSID=%s bssid_set=%d",
+             "queue direct STA switch to SSID=%s bssid_set=%d",
              ssid,
              bssid_set ? 1 : 0);
     s_sta_reconnect_enabled = true;
@@ -693,8 +840,36 @@ void wifi_manager_connect_specific_sta(const app_config_t *cfg,
     s_sta_rssi = -127;
     s_sta_channel = 0;
     strlcpy(s_sta_phy, "N/A", sizeof(s_sta_phy));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
-    ESP_ERROR_CHECK(esp_wifi_connect());
+
+    portENTER_CRITICAL(&s_sta_state_lock);
+    s_pending_sta_config = sta_cfg;
+    s_pending_sta_config_valid = true;
+    s_connect_generation++;
+    wifi_sta_state_t previous_state = s_sta_state;
+    if (s_sta_state != WIFI_STA_STATE_IDLE) {
+        s_sta_state = WIFI_STA_STATE_SWITCHING;
+    }
+    portEXIT_CRITICAL(&s_sta_state_lock);
+
+    if (previous_state == WIFI_STA_STATE_IDLE) {
+        apply_pending_sta_config();
+        return;
+    }
+
+    if (previous_state == WIFI_STA_STATE_SWITCHING) {
+        APP_LOGI(TAG, "replace pending STA config while switch is already in progress");
+        return;
+    }
+
+    esp_err_t err = esp_wifi_disconnect();
+    if (err == ESP_OK) {
+        APP_LOGI(TAG, "waiting for STA disconnect before applying new config");
+        return;
+    }
+
+    APP_LOG_ERR(TAG, err, "STA disconnect for config switch did not start; apply immediately");
+    set_sta_state(WIFI_STA_STATE_IDLE);
+    apply_pending_sta_config();
 }
 
 void wifi_manager_connect_sta(const app_config_t *cfg)
@@ -709,7 +884,20 @@ void wifi_manager_connect_sta(const app_config_t *cfg)
         return;
     }
 
-    s_saved_cfg = *cfg;
+    wifi_sta_state_t state = get_sta_state();
+    if (state != WIFI_STA_STATE_IDLE) {
+        APP_LOGI(TAG, "skip saved-profile connect while state=%s",
+                 wifi_sta_state_to_str(state));
+        return;
+    }
+
+    app_config_t requested_cfg = *cfg;
+    cfg = &requested_cfg;
+    s_saved_cfg = requested_cfg;
+
+    portENTER_CRITICAL(&s_sta_state_lock);
+    const uint32_t request_generation = ++s_connect_generation;
+    portEXIT_CRITICAL(&s_sta_state_lock);
 
     wifi_ap_record_t best_ap = {0};
     wifi_profile_t best_profile = {0};
@@ -768,6 +956,16 @@ void wifi_manager_connect_sta(const app_config_t *cfg)
     }
 
 connect_sta:
+    if (request_generation != s_connect_generation ||
+        get_sta_state() != WIFI_STA_STATE_IDLE) {
+        APP_LOGI(TAG,
+                 "discard saved-profile result: request_gen=%" PRIu32 " current_gen=%" PRIu32 " state=%s",
+                 request_generation,
+                 s_connect_generation,
+                 wifi_sta_state_to_str(get_sta_state()));
+        return;
+    }
+
     wifi_config_t sta_cfg = {0};
     strlcpy((char *)sta_cfg.sta.ssid, best_profile.wifi_ssid, sizeof(sta_cfg.sta.ssid));
     strlcpy((char *)sta_cfg.sta.password, best_profile.wifi_pass, sizeof(sta_cfg.sta.password));
@@ -792,13 +990,22 @@ connect_sta:
     }
     strlcpy(s_sta_ssid, best_profile.wifi_ssid, sizeof(s_sta_ssid));
     s_sta_reconnect_enabled = true;
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
-    ESP_ERROR_CHECK(esp_wifi_connect());
+    esp_err_t err = start_sta_with_config(&sta_cfg, "saved profile");
+    if (err != ESP_OK &&
+        request_generation == s_connect_generation &&
+        s_sta_reconnect_enabled) {
+        schedule_sta_reconnect();
+    }
 }
 
 void wifi_manager_enable_sta_reconnect(bool enable)
 {
     s_sta_reconnect_enabled = enable;
+    if (!enable) {
+        portENTER_CRITICAL(&s_sta_state_lock);
+        s_connect_generation++;
+        portEXIT_CRITICAL(&s_sta_state_lock);
+    }
 }
 
 void wifi_manager_set_status_cb(wifi_status_cb_t cb)
@@ -814,6 +1021,14 @@ void wifi_manager_disconnect_sta(void)
      */
     s_sta_reconnect_enabled = false;
     s_sta_connected = false;
+    portENTER_CRITICAL(&s_sta_state_lock);
+    s_pending_sta_config_valid = false;
+    s_connect_generation++;
+    wifi_sta_state_t previous_state = s_sta_state;
+    if (s_sta_state != WIFI_STA_STATE_IDLE) {
+        s_sta_state = WIFI_STA_STATE_SWITCHING;
+    }
+    portEXIT_CRITICAL(&s_sta_state_lock);
     s_sta_rssi = -127;
     s_sta_channel = 0;
     strlcpy(s_sta_phy, "N/A", sizeof(s_sta_phy));
@@ -821,8 +1036,18 @@ void wifi_manager_disconnect_sta(void)
     s_last_connected_ssid[0] = '\0';
     s_preferred_fallback_ssid[0] = '\0';
     strlcpy(s_sta_ip_str, "0.0.0.0", sizeof(s_sta_ip_str));
-    esp_wifi_disconnect();
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &(wifi_config_t){0}));
+    esp_err_t err = esp_wifi_disconnect();
+    if (err != ESP_OK) {
+        set_sta_state(WIFI_STA_STATE_IDLE);
+        APP_LOG_ERR(TAG, err, "disconnect STA while clearing configuration failed");
+    } else if (previous_state == WIFI_STA_STATE_IDLE) {
+        set_sta_state(WIFI_STA_STATE_IDLE);
+    }
+
+    err = esp_wifi_set_config(WIFI_IF_STA, &(wifi_config_t){0});
+    if (err != ESP_OK) {
+        APP_LOG_ERR(TAG, err, "clear runtime STA configuration failed");
+    }
 }
 
 void wifi_manager_reconnect_sta(void)
@@ -844,10 +1069,23 @@ void wifi_manager_reconnect_sta(void)
     APP_LOGW(TAG, "force STA reconnect requested");
     s_sta_reconnect_enabled = true;
 
-    if (s_sta_connected) {
-        esp_wifi_disconnect();
-    } else {
+    wifi_sta_state_t state = get_sta_state();
+    if (state == WIFI_STA_STATE_IDLE) {
         wifi_manager_connect_sta(&s_saved_cfg);
+    } else if (state == WIFI_STA_STATE_ONLINE || state == WIFI_STA_STATE_WAIT_IP) {
+        portENTER_CRITICAL(&s_sta_state_lock);
+        s_connect_generation++;
+        s_sta_state = WIFI_STA_STATE_SWITCHING;
+        portEXIT_CRITICAL(&s_sta_state_lock);
+        esp_err_t err = esp_wifi_disconnect();
+        if (err != ESP_OK) {
+            set_sta_state(WIFI_STA_STATE_IDLE);
+            APP_LOG_ERR(TAG, err, "force STA disconnect failed");
+            schedule_sta_reconnect();
+        }
+    } else {
+        APP_LOGI(TAG, "skip force reconnect while state=%s",
+                 wifi_sta_state_to_str(state));
     }
 }
 

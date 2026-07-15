@@ -146,8 +146,6 @@ void blufi_dh_negotiate_data_handler(uint8_t *data,
 
 #if BLUFI_DEBUG_SECURITY_LOG
         APP_LOG_HEX(TAG, "blufi self_public_key", s_blufi_sec->self_public_key, (size_t)dhm_len);
-        APP_LOG_HEX(TAG, "blufi shared_key", s_blufi_sec->share_key, s_blufi_sec->share_len);
-        APP_LOG_HEX(TAG, "blufi session_psk", s_blufi_sec->psk, PSK_LEN);
 #endif
 
         mbedtls_aes_setkey_enc(&s_blufi_sec->aes, s_blufi_sec->psk, PSK_LEN * 8);

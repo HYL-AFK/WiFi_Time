@@ -18,6 +18,8 @@ typedef struct {
 
 esp_err_t ds3231_init(void);
 esp_err_t ds3231_read(ds3231_time_t *out);
+/* 读取芯片温度，返回以 0.25 摄氏度为单位的有符号整数。 */
+esp_err_t ds3231_read_temperature_q4(int16_t *out_quarter_degrees);
 esp_err_t ds3231_write(const struct tm *value);
 void ds3231_get_register_cache(ds3231_register_cache_t *out);
 uint8_t ds3231_bin_to_bcd(uint8_t value);
