@@ -12,9 +12,7 @@ typedef enum {
 
 typedef struct {
     float temperature_c;
-    int humidity;
     int weather_code;
-    float wind_kmh;
     bool valid;
     bool temperature_valid;
     weather_temperature_source_t temperature_source;

@@ -18,6 +18,8 @@
 static const char *TAG = "app_rtc";
 
 static bool s_rtc_temperature_loaded;
+static bool s_rtc_time_loaded;
+static bool s_ds3231_ready;
 static bool s_rtc_time_logged;
 static uint32_t s_rtc_time_failures;
 static uint32_t s_rtc_temperature_failures;
@@ -65,9 +67,17 @@ static void read_rtc_to_snapshot(void)
         s_rtc_time_logged = true;
     }
 
+    value.time.tm_isdst = -1;
     time_t now = mktime(&value.time);
+    if (now == (time_t)-1) {
+        APP_LOGE(TAG, "RTC local time conversion failed");
+        return;
+    }
     struct timeval tv = {.tv_sec = now, .tv_usec = 0};
-    settimeofday(&tv, NULL);
+    if (settimeofday(&tv, NULL) != 0) {
+        APP_LOGE(TAG, "set system time from RTC failed");
+        return;
+    }
 
     time_snapshot_t snap = {
         .local_time = value.time,
@@ -76,6 +86,7 @@ static void read_rtc_to_snapshot(void)
         .from_sntp = false,
     };
     time_snapshot_set(&snap);
+    s_rtc_time_loaded = true;
 }
 
 static void read_rtc_temperature_to_snapshot(void)
@@ -117,12 +128,19 @@ static void rtc_task(void *arg)
 {
     (void)arg;
     for (;;) {
-        time_snapshot_t snap = {0};
-        time_snapshot_get(&snap);
-        if (!snap.from_sntp) {
+        if (!s_ds3231_ready) {
+            esp_err_t err = ds3231_init();
+            if (err == ESP_OK) {
+                s_ds3231_ready = true;
+                APP_LOGI(TAG, "DS3231 initialization recovered");
+            } else {
+                APP_LOG_ERR(TAG, err, "DS3231 initialization retry failed");
+            }
+        }
+        if (s_ds3231_ready && !s_rtc_time_loaded) {
             read_rtc_to_snapshot();
         }
-        if (!s_rtc_temperature_loaded) {
+        if (s_ds3231_ready && !s_rtc_temperature_loaded) {
             read_rtc_temperature_to_snapshot();
         }
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -133,9 +151,10 @@ static void rtc_task(void *arg)
 esp_err_t app_rtc_init(void)
 {
     esp_err_t err = ds3231_init();
-    if (err != ESP_OK) {
+    if (err == ESP_OK) {
+        s_ds3231_ready = true;
+    } else {
         APP_LOG_ERR(TAG, err, "DS3231 init failed");
-        return err;
     }
 
     err = time_snapshot_init();
@@ -144,8 +163,10 @@ esp_err_t app_rtc_init(void)
         return err;
     }
 
-    read_rtc_to_snapshot();
-    read_rtc_temperature_to_snapshot();
+    if (s_ds3231_ready) {
+        read_rtc_to_snapshot();
+        read_rtc_temperature_to_snapshot();
+    }
     if (xTaskCreate(rtc_task, "rtc_task", 3072, NULL, 5, NULL) != pdPASS) {
         APP_LOGE(TAG, "create rtc_task failed");
         return ESP_ERR_NO_MEM;
@@ -155,6 +176,11 @@ esp_err_t app_rtc_init(void)
 
 esp_err_t app_rtc_set_from_system(void)
 {
+    if (!s_ds3231_ready) {
+        esp_err_t init_err = ds3231_init();
+        if (init_err != ESP_OK) return init_err;
+        s_ds3231_ready = true;
+    }
     /* SNTP 成功后把本地时间写回 DS3231，供下一次冷启动使用。 */
     time_t now = time(NULL);
     struct tm local;

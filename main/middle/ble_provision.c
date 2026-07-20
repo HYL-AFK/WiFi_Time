@@ -318,7 +318,12 @@ static void blufi_apply_pending_sta_config(void)
         return;
     }
 
-    app_config_save(&s_cfg);
+    esp_err_t save_err = app_config_save(&s_cfg);
+    if (save_err != ESP_OK) {
+        APP_LOG_ERR(TAG, save_err, "save STA profile to NVS failed");
+        esp_blufi_send_error_info(ESP_BLUFI_DATA_FORMAT_ERROR);
+        return;
+    }
     s_sta_connecting = true;
     s_last_sta_reason = 0xff;
     s_last_sta_rssi = -128;
@@ -420,7 +425,7 @@ static void blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_
         APP_LOGI(TAG, "BluFi recv STA password len=%d", param->sta_passwd.passwd_len);
         break;
 
-    case ESP_BLUFI_EVENT_RECV_SOFTAP_SSID:
+    case ESP_BLUFI_EVENT_RECV_SOFTAP_SSID: {
         if (param->softap_ssid.ssid_len <= 0 || param->softap_ssid.ssid_len > AP_NAME_MAX_LEN) {
             esp_blufi_send_error_info(ESP_BLUFI_DATA_FORMAT_ERROR);
             break;
@@ -428,12 +433,17 @@ static void blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_
         memcpy(s_cfg.ap_name, param->softap_ssid.ssid, (size_t)param->softap_ssid.ssid_len);
         s_cfg.ap_name[param->softap_ssid.ssid_len] = '\0';
         s_cfg.has_ap_name = true;
-        app_config_save(&s_cfg);
+        esp_err_t save_err = app_config_save(&s_cfg);
+        if (save_err != ESP_OK) {
+            APP_LOG_ERR(TAG, save_err, "save SoftAP SSID to NVS failed");
+            break;
+        }
         wifi_manager_set_ap_name(s_cfg.ap_name);
         APP_LOGI(TAG, "BluFi recv SoftAP SSID=%s", s_cfg.ap_name);
         break;
+    }
 
-    case ESP_BLUFI_EVENT_RECV_SOFTAP_PASSWD:
+    case ESP_BLUFI_EVENT_RECV_SOFTAP_PASSWD: {
         if (param->softap_passwd.passwd_len < 0 || param->softap_passwd.passwd_len > AP_PASS_MAX_LEN) {
             esp_blufi_send_error_info(ESP_BLUFI_DATA_FORMAT_ERROR);
             break;
@@ -441,12 +451,17 @@ static void blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_
         memcpy(s_cfg.ap_pass, param->softap_passwd.passwd, (size_t)param->softap_passwd.passwd_len);
         s_cfg.ap_pass[param->softap_passwd.passwd_len] = '\0';
         s_cfg.has_ap_pass = true;
-        app_config_save(&s_cfg);
+        esp_err_t save_err = app_config_save(&s_cfg);
+        if (save_err != ESP_OK) {
+            APP_LOG_ERR(TAG, save_err, "save SoftAP password to NVS failed");
+            break;
+        }
         if (strlen(s_cfg.ap_pass) >= 8) {
             wifi_manager_set_ap_password(s_cfg.ap_pass);
         }
         APP_LOGI(TAG, "BluFi recv SoftAP password len=%d", param->softap_passwd.passwd_len);
         break;
+    }
 
     case ESP_BLUFI_EVENT_GET_WIFI_LIST:
         APP_LOGI(TAG, "BluFi request wifi list");

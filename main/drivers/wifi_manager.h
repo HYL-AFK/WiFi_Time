@@ -1,5 +1,8 @@
 #pragma once
 
+#include <stdbool.h>
+#include <stdint.h>
+
 /*
  * Wi-Fi 管理接口。
  *
@@ -11,13 +14,14 @@
  */
 
 #include "esp_netif_ip_addr.h"
+#include "esp_err.h"
 #include "esp_wifi_types.h"
 #include "app_config.h"
 
 /* Wi-Fi 状态变化回调。BLE 广播状态位刷新就是通过这个回调触发的。 */
 typedef void (*wifi_status_cb_t)(void);
 
-void wifi_manager_init(const app_config_t *cfg);
+esp_err_t wifi_manager_init(const app_config_t *cfg);
 
 /* 从 cfg 中选择可用且信号最强的已保存 Wi-Fi，并发起 STA 连接。 */
 void wifi_manager_connect_sta(const app_config_t *cfg);
@@ -45,6 +49,7 @@ void wifi_manager_set_ap_password(const char *ap_pass);
 /* 状态查询接口，主要给 BLE 广播状态位、App 查询和日志使用。 */
 bool wifi_manager_is_sta_connected(void);
 bool wifi_manager_is_ap_started(void);
+uint32_t wifi_manager_get_sta_failure_count(void);
 
 /* 获取当前已连接 STA 的运行时信息。 */
 int wifi_manager_get_sta_rssi(void);

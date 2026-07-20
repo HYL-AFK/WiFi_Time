@@ -1,25 +1,47 @@
 #include "ws2812_matrix.h"
 #include <string.h>
 #include "driver/gpio.h"
+#include "esp_rom_sys.h"
 #include "led_strip.h"
 #include "led_strip_rmt.h"
 
 #define WS2812_GPIO GPIO_NUM_10
 static led_strip_handle_t s_strip;
-/* DIN 位于物理右上角；实物索引相对逻辑画面旋转 90 度，逐列同向排列。 */
+/* 在原物理补偿基础上将完整逻辑画面再旋转 180 度，逐列同向排列。 */
 static matrix_mapping_t s_map = {
     .serpentine = false,
     .mirror_x = false,
     .mirror_y = false,
-    .rotation = 3,
+    .rotation = 1,
 };
 static uint8_t s_frame[MATRIX_PIXELS][3];
 static uint8_t s_displayed_frame[MATRIX_PIXELS][3];
 static uint8_t s_displayed_brightness;
 static bool s_displayed_frame_valid;
 
+static uint32_t frame_crc32(void)
+{
+    uint32_t crc = UINT32_MAX;
+    const uint8_t *bytes = &s_frame[0][0];
+    for (size_t i = 0; i < sizeof(s_frame); ++i) {
+        crc ^= bytes[i];
+        for (uint8_t bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1) ^ (0xedb88320U & (uint32_t)-(int32_t)(crc & 1U));
+        }
+    }
+    return ~crc;
+}
+
 esp_err_t ws2812_matrix_init(void)
 {
+    esp_err_t err = gpio_set_direction(WS2812_GPIO, GPIO_MODE_OUTPUT);
+    if (err != ESP_OK) return err;
+    err = gpio_set_pull_mode(WS2812_GPIO, GPIO_PULLDOWN_ONLY);
+    if (err != ESP_OK) return err;
+    err = gpio_set_level(WS2812_GPIO, 0);
+    if (err != ESP_OK) return err;
+    esp_rom_delay_us(300);
+
     led_strip_config_t cfg = {.strip_gpio_num = WS2812_GPIO, .max_leds = MATRIX_PIXELS,
                                .led_pixel_format = LED_PIXEL_FORMAT_GRB,
                                .led_model = LED_MODEL_WS2812,
@@ -27,12 +49,12 @@ esp_err_t ws2812_matrix_init(void)
     led_strip_rmt_config_t rmt = {.clk_src = RMT_CLK_SRC_DEFAULT,
                                    .resolution_hz = 10 * 1000 * 1000,
                                    .flags.with_dma = true};
-    esp_err_t err = led_strip_new_rmt_device(&cfg, &rmt, &s_strip);
+    err = led_strip_new_rmt_device(&cfg, &rmt, &s_strip);
     if (err != ESP_OK) return err;
 
     s_displayed_frame_valid = false;
 
-    err = gpio_set_pull_mode(WS2812_GPIO, GPIO_FLOATING);
+    err = gpio_set_pull_mode(WS2812_GPIO, GPIO_PULLDOWN_ONLY);
     if (err != ESP_OK) return err;
     return gpio_set_drive_capability(WS2812_GPIO, GPIO_DRIVE_CAP_3);
 }
@@ -41,6 +63,7 @@ void ws2812_matrix_set_mapping(matrix_mapping_t mapping) { s_map = mapping; }
 
 uint16_t ws2812_matrix_index(uint8_t x, uint8_t y)
 {
+    /* 先限制逻辑坐标，再按实际点阵方向转换为灯珠索引。 */
     if (x >= 16 || y >= 16) return 0;
     if (s_map.mirror_x) x = 15 - x;
     if (s_map.mirror_y) y = 15 - y;
@@ -56,16 +79,21 @@ uint16_t ws2812_matrix_index(uint8_t x, uint8_t y)
 
 void ws2812_matrix_set_pixel(uint8_t x, uint8_t y, uint8_t r, uint8_t g, uint8_t b)
 {
-    uint16_t i = ws2812_matrix_index(x, y); s_frame[i][0] = r; s_frame[i][1] = g; s_frame[i][2] = b;
+    if (x >= MATRIX_WIDTH || y >= MATRIX_HEIGHT) return;
+
+    uint16_t i = ws2812_matrix_index(x, y);
+    s_frame[i][0] = r;
+    s_frame[i][1] = g;
+    s_frame[i][2] = b;
 }
 void ws2812_matrix_clear(void) { memset(s_frame, 0, sizeof(s_frame)); }
 
-esp_err_t ws2812_matrix_show(uint8_t brightness_percent)
+static esp_err_t show_frame(uint8_t brightness_percent, bool force)
 {
     if (!s_strip) return ESP_ERR_INVALID_STATE;
     if (brightness_percent > 100) brightness_percent = 100;
 
-    if (s_displayed_frame_valid &&
+    if (!force && s_displayed_frame_valid &&
         s_displayed_brightness == brightness_percent &&
         memcmp(s_frame, s_displayed_frame, sizeof(s_frame)) == 0) {
         return ESP_OK;
@@ -86,4 +114,41 @@ esp_err_t ws2812_matrix_show(uint8_t brightness_percent)
     s_displayed_brightness = brightness_percent;
     s_displayed_frame_valid = true;
     return ESP_OK;
+}
+
+esp_err_t ws2812_matrix_show(uint8_t brightness_percent)
+{
+    return show_frame(brightness_percent, false);
+}
+
+esp_err_t ws2812_matrix_show_force(uint8_t brightness_percent)
+{
+    return show_frame(brightness_percent, true);
+}
+
+void ws2812_matrix_get_frame_diagnostics(ws2812_frame_diagnostics_t *out)
+{
+    if (out == NULL) return;
+
+    memset(out, 0, sizeof(*out));
+    out->grayscale = true;
+    out->crc32 = frame_crc32();
+    for (uint8_t y = 0; y < MATRIX_HEIGHT; ++y) {
+        for (uint8_t x = 0; x < MATRIX_WIDTH; ++x) {
+            const uint16_t index = ws2812_matrix_index(x, y);
+            const uint8_t red = s_frame[index][0];
+            const uint8_t green = s_frame[index][1];
+            const uint8_t blue = s_frame[index][2];
+            if (red == green && green == blue) continue;
+
+            out->grayscale = false;
+            out->x = x;
+            out->y = y;
+            out->red = red;
+            out->green = green;
+            out->blue = blue;
+            out->physical_index = index;
+            return;
+        }
+    }
 }

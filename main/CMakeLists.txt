@@ -2,10 +2,13 @@ idf_component_register(
     SRCS
         "main.c"
         "common/app_config.c"
+        "common/location_snapshot.c"
+        "common/runtime_event_log.c"
         "common/time_snapshot.c"
         "common/weather_snapshot.c"
         "drivers/wifi_manager.c"
         "drivers/ds3231.c"
+        "drivers/radar_presence.c"
         "drivers/ws2812_matrix.c"
         "middle/ble_provision.c"
         "middle/blufi_security.c"
@@ -13,6 +16,7 @@ idf_component_register(
         "app/app_time.c"
         "app/app_weather.c"
         "app/app_display.c"
+        "app/app_health.c"
     INCLUDE_DIRS "." "app" "common" "drivers" "middle"
     REQUIRES
         bt
@@ -20,6 +24,7 @@ idf_component_register(
         esp_driver_i2c
         esp_driver_gpio
         esp_driver_rmt
+        esp_driver_tsens
         esp_event
         esp_http_client
         esp_netif

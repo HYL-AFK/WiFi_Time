@@ -9,6 +9,7 @@
  */
 
 #include <stdbool.h>
+#include "esp_err.h"
 
 #define WIFI_SSID_MAX_LEN      32
 #define WIFI_PASS_MAX_LEN      64
@@ -28,6 +29,8 @@ typedef struct {
     /* Saved STA Wi-Fi profiles; wifi_manager prefers the strongest matching SSID. */
     wifi_profile_t wifi_profiles[WIFI_PROFILE_MAX_NUM];
     int wifi_count;
+    char last_wifi_ssid[WIFI_SSID_MAX_LEN + 1];
+    bool has_last_wifi_ssid;
 
     /* User display name. BLE advertising name stays fixed as ESPARK-PowerGo. */
     char ble_name[BLE_NAME_MAX_LEN + 1];
@@ -47,7 +50,8 @@ typedef struct {
 void app_config_load(app_config_t *cfg);
 
 /* Save current config to NVS. */
-void app_config_save(const app_config_t *cfg);
+esp_err_t app_config_save(const app_config_t *cfg);
+esp_err_t app_config_save_last_wifi_ssid(const char *ssid);
 
 /* Fill a default config in memory without touching NVS. */
 void app_config_set_default(app_config_t *cfg);
@@ -56,7 +60,7 @@ void app_config_set_default(app_config_t *cfg);
 bool app_config_add_or_update_wifi(app_config_t *cfg, const char *ssid, const char *pass);
 
 /* Erase the whole application config namespace. */
-void app_config_erase_all(void);
+esp_err_t app_config_erase_all(void);
 
 /* Erase only STA Wi-Fi profiles; BLE name and AP config stay untouched. */
-void app_config_erase_wifi(void);
+esp_err_t app_config_erase_wifi(void);

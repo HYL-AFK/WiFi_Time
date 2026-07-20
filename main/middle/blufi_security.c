@@ -13,13 +13,6 @@
 
 static const char *TAG = "blufi_sec";
 
-/*
- * Debug only:
- * - Logs negotiated BluFi key material so the current session can be verified.
- * - Disable or remove before release firmware.
- */
-#define BLUFI_DEBUG_SECURITY_LOG 1
-
 #define SEC_TYPE_DH_PARAM_LEN   0x00
 #define SEC_TYPE_DH_PARAM_DATA  0x01
 #define SEC_TYPE_DH_P           0x02
@@ -143,10 +136,6 @@ void blufi_dh_negotiate_data_handler(uint8_t *data,
             btc_blufi_report_error(ESP_BLUFI_CALC_MD5_ERROR);
             return;
         }
-
-#if BLUFI_DEBUG_SECURITY_LOG
-        APP_LOG_HEX(TAG, "blufi self_public_key", s_blufi_sec->self_public_key, (size_t)dhm_len);
-#endif
 
         mbedtls_aes_setkey_enc(&s_blufi_sec->aes, s_blufi_sec->psk, PSK_LEN * 8);
         *output_data = s_blufi_sec->self_public_key;
