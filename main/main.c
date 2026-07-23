@@ -25,7 +25,7 @@ static const char *TAG = "witime";
 static bool s_last_sta_connected;
 static uint32_t s_last_sta_failure_count;
 #define WITIME_RADAR_ENABLED 1
-#define WITIME_RADAR_STANDALONE_TEST 1
+#define WITIME_RADAR_STANDALONE_TEST 0
 
 #if WITIME_RADAR_ENABLED
 static void radar_changed(bool detected, uint32_t distance_mm)

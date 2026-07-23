@@ -203,7 +203,8 @@ Assert-True ($displaySource.Contains('s_brightness_percent')) "display must use 
 Assert-True ($mainSource.Contains('radar_presence_set_callback') -and
              $mainSource.Contains('app_display_set_brightness')) "main must connect radar state to display brightness"
 Assert-True ($mainSource.Contains('WITIME_RADAR_ENABLED 1') -and
-             $mainSource.Contains('#if WITIME_RADAR_ENABLED')) "radar test mode must be explicitly enabled"
+             $mainSource.Contains('WITIME_RADAR_STANDALONE_TEST 0') -and
+             $mainSource.Contains('#if WITIME_RADAR_ENABLED')) "normal clock firmware must keep radar optional"
 Assert-True ($mainSource.Contains('esp_reset_reason') -and
              $mainSource.Contains('esp_get_free_heap_size')) "boot reset and heap diagnostics are missing"
 Assert-True ($mainSource.Contains('app_health_init')) "health monitor must be initialized"
@@ -299,7 +300,10 @@ Assert-True ($displaySource.Contains('#define MATRIX_BRIGHTNESS_HIGH 60') -and
 Assert-True ($displaySource.Contains('DISPLAY_WHITE, DISPLAY_WHITE, DISPLAY_WHITE')) "time, weather, temperature and seconds must use white LEDs"
 Assert-True ($displaySource.Contains('local_time->tm_sec') -and
              $displaySource.Contains('CLOCK_COLON_X')) "clock colon must blink from the current second"
-Assert-True ($displaySource.Contains('#define STARTUP_FRAME_PERIOD_MS 100')) "startup chase animation must update every 100ms"
+Assert-True ($displaySource.Contains('#define STARTUP_FRAME_PERIOD_MS 50')) "startup chase animation must refresh smoothly every 50ms"
+Assert-True ($displaySource.Contains('static uint32_t startup_frame_for_elapsed')) "startup chase must derive its position from elapsed time"
+Assert-True ($displaySource.Contains('STARTUP_RING_LAP_DURATION_MS 6000')) "one startup ring lap must last 6 seconds"
+Assert-True (-not $displaySource.Contains('render_startup_frame(startup_frame++)')) "startup ring must not restart from a counter increment at cycle boundaries"
 Assert-True ($displaySource.Contains('#define STARTUP_RING_TRAIL_LENGTH 5') -and
              $displaySource.Contains('s_startup_trail_levels')) "startup ring chase must use a five-pixel fading trail"
 Assert-True (-not $displaySource.Contains('STARTUP_HAND_FRAME') -and
@@ -309,7 +313,7 @@ Assert-True ($displaySource.Contains('render_startup_frame_scaled') -and
              -not $displaySource.Contains('DISPLAY_CYAN_R')) "startup animation must use grayscale brightness levels"
 Assert-True ($displaySource.Contains('#define STARTUP_FADE_STEP_MS 100') -and
              $displaySource.Contains('render_startup_fade_out(startup_frame)')) "startup page must use a two-step 200ms fade before transitions"
-Assert-True ($displaySource.Contains('#define BOOT_MIN_DURATION_MS 6000')) "boot animation minimum duration must be 6 seconds"
+Assert-True ($displaySource.Contains('#define STARTUP_RING_LAP_DURATION_MS 6000')) "startup ring lap must be 6 seconds"
 Assert-True ($displaySource.Contains('#define BOOT_ANIMATION_CYCLE_COUNT 3')) "boot must allow three animation cycles before failure"
 Assert-True ($displaySource.Contains('boot_animation_cycle')) "boot animation cycle counter is missing"
 Assert-True ($displaySource.Contains('boot_animation_cycle >= BOOT_ANIMATION_CYCLE_COUNT')) "boot failure must wait for three complete animation cycles"
@@ -318,12 +322,21 @@ Assert-True (-not $displaySource.Contains('BOOT_NETWORK_DEADLINE_MS')) "boot mus
 Assert-True (-not $displaySource.Contains('boot_time_failure_shown')) "boot failure must not be triggered only by missing time"
 Assert-True ($displaySource.Contains('DISPLAY_MODE_BOOT') -and
              $displaySource.Contains('DISPLAY_MODE_MAIN')) "display boot/main state machine is missing"
-Assert-True ($displaySource.Contains('time_snapshot_is_ready()')) "display must wait for a valid RTC or SNTP time"
+Assert-True ($displaySource.Contains('static void set_elapsed_time')) "display must derive a 00:00 fallback clock when no time source is ready"
+Assert-True ($displaySource.Contains('elapsed_seconds')) "fallback clock must advance from display uptime"
+Assert-True ($displaySource.Contains('boot_timed_out_without_time_source')) "display must explicitly handle boot timeout without a time source"
+Assert-True ($displaySource -match '(?s)boot_timed_out_without_time_source.*?mode = DISPLAY_MODE_MAIN;') "boot timeout without RTC or Wi-Fi must enter the main display"
+Assert-True ($displaySource -match '(?s)NETWORK_NOTICE_SUCCESS.*?mode = DISPLAY_MODE_MAIN;') "Wi-Fi success must enter the main display without waiting for SNTP"
+Assert-True ($displaySource.Contains('if (pending_notice == NETWORK_NOTICE_SUCCESS || s_network_connected)')) "boot must retain the Wi-Fi success page after a short-lived connection"
+Assert-True (([regex]::Matches($displaySource, 'mode\s*=\s*DISPLAY_MODE_BOOT')).Count -eq 1) "Wi-Fi loss after main-page entry must not re-enter boot mode"
+Assert-True ($displaySource.Contains('if (time_ready && flow_animation_due(&snapshot))')) "flow animation must not run from the 00:00 fallback clock"
 Assert-True ($displayHeader.Contains('app_display_set_network_connected(bool connected)') -and
              $displaySource.Contains('s_network_connected')) "display must receive the current STA network state"
-Assert-True ($displaySource.Contains('pending_notice = NETWORK_NOTICE_NONE;') -and
-             $displaySource.Contains('failure_notice_allowed') -and
-             $displaySource.Contains('BOOT_ANIMATION_CYCLE_COUNT')) "network notices must be handled within the cycle-based boot window"
+Assert-True ($displaySource.Contains('s_network_seen') -and
+             $displaySource.Contains('if (connected) s_network_seen = true;')) "a successful Wi-Fi link must survive later disconnection during boot"
+Assert-True ($displaySource.Contains('boot_ready_for_main') -and
+             $displaySource.Contains('time_ready || s_network_seen')) "RTC, SNTP, or an earlier Wi-Fi link must enter the main display"
+Assert-True ($displaySource -match '(?s)if \(!boot_ready_for_main\) \{\s*continue;\s*\}') "an unfinished boot lap must not fall through to main-page rendering"
 Assert-True (-not $displaySource.Contains('} else if (pending_notice != NETWORK_NOTICE_NONE) {')) "network results after main-page entry must not cover the main page"
 Assert-True ($displaySource.Contains('render_startup_frame')) "startup clock sweep renderer is missing"
 Assert-True ($displaySource.Contains('DISPLAY_NOTICE_DURATION_MS 1500')) "network result pages must last 1.5 seconds"

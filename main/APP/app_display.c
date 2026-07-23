@@ -64,11 +64,11 @@
 #define DISPLAY_RED_G 8
 #define DISPLAY_RED_B 8
 #define DISPLAY_REFRESH_PERIOD_MS 50
-#define STARTUP_FRAME_PERIOD_MS 100
+#define STARTUP_FRAME_PERIOD_MS 50
 #define STARTUP_RING_TRAIL_LENGTH 5
 #define STARTUP_RING_DIM 16
+#define STARTUP_RING_LAP_DURATION_MS 6000
 #define STARTUP_FADE_STEP_MS 100
-#define BOOT_MIN_DURATION_MS 6000
 #define BOOT_ANIMATION_CYCLE_COUNT 3
 #define DISPLAY_NOTICE_DURATION_MS 1500
 #define FLOW_FRAME_COUNT 32
@@ -89,6 +89,7 @@ static uint32_t s_last_main_crc;
 static bool s_last_main_crc_valid;
 static bool s_last_output_main;
 static bool s_network_connected;
+static bool s_network_seen;
 static volatile uint8_t s_brightness_percent = MATRIX_BRIGHTNESS_HIGH;
 static TaskHandle_t s_display_task_handle;
 static TickType_t s_last_main_force_refresh;
@@ -340,6 +341,14 @@ static uint8_t scale_startup_level(uint8_t level, uint8_t scale_percent)
     return (uint8_t)(((uint16_t)level * scale_percent) / 100U);
 }
 
+static uint32_t startup_frame_for_elapsed(uint32_t elapsed_ms)
+{
+    const uint32_t ring_count =
+        (uint32_t)(sizeof(s_startup_clock_ring) / sizeof(s_startup_clock_ring[0]));
+    return (uint32_t)(((uint64_t)elapsed_ms * ring_count) /
+                      STARTUP_RING_LAP_DURATION_MS);
+}
+
 static void render_startup_frame_scaled(uint32_t frame, uint8_t scale_percent)
 {
     s_last_output_main = false;
@@ -411,19 +420,42 @@ static void render_network_failure(void)
     (void)show_frame_with_retry();
 }
 
-static void render_normal(void)
+static void set_elapsed_time(struct tm *out, TickType_t display_started)
+{
+    if (out == NULL) return;
+
+    *out = (struct tm){0};
+    const uint32_t elapsed_seconds =
+        (uint32_t)(((xTaskGetTickCount() - display_started) * portTICK_PERIOD_MS) / 1000U);
+    out->tm_hour = (int)((elapsed_seconds / 3600U) % 24U);
+    out->tm_min = (int)((elapsed_seconds / 60U) % 60U);
+    out->tm_sec = (int)(elapsed_seconds % 60U);
+}
+
+static bool render_normal(TickType_t display_started, time_snapshot_t *out_snapshot)
 {
     time_snapshot_t time_snapshot = {0};
     weather_snapshot_t weather = {0};
-    time_snapshot_get(&time_snapshot);
+    const bool time_ready = time_snapshot_is_ready();
+    if (time_ready) {
+        time_snapshot_get(&time_snapshot);
+    } else {
+        set_elapsed_time(&time_snapshot.local_time, display_started);
+    }
     weather_snapshot_get(&weather);
 
-    time_t now = time(NULL);
-    struct tm local_time;
-    if (now != (time_t)-1) {
-        localtime_r(&now, &local_time);
-        time_snapshot.local_time = local_time;
-        time_snapshot.unix_time = now;
+    if (time_ready) {
+        time_t now = time(NULL);
+        struct tm local_time;
+        if (now != (time_t)-1) {
+            localtime_r(&now, &local_time);
+            time_snapshot.local_time = local_time;
+            time_snapshot.unix_time = now;
+        }
+    }
+
+    if (out_snapshot != NULL) {
+        *out_snapshot = time_snapshot;
     }
 
     ws2812_matrix_clear();
@@ -442,7 +474,7 @@ static void render_normal(void)
                  " x=%u y=%u physical=%u rgb=(%u,%u,%u)",
                  s_main_frame_sequence, diag.crc32, diag.x, diag.y,
                  diag.physical_index, diag.red, diag.green, diag.blue);
-        return;
+        return time_ready;
     }
 
     const bool frame_changed = !s_last_output_main || !s_last_main_crc_valid ||
@@ -458,19 +490,19 @@ static void render_normal(void)
                 s_last_output_main = false;
             }
         }
-        return;
+        return time_ready;
     }
 
     s_main_frame_sequence++;
     if (show_frame_with_retry() != ESP_OK) {
         s_last_output_main = false;
-        return;
+        return time_ready;
     }
 
     esp_rom_delay_us(WS2812_DUPLICATE_LATCH_US);
     if (show_frame_force_with_retry() != ESP_OK) {
         s_last_output_main = false;
-        return;
+        return time_ready;
     }
 
     s_duplicate_refresh_total++;
@@ -486,6 +518,8 @@ static void render_normal(void)
                  s_main_frame_sequence, diag.crc32, s_non_grayscale_total,
                  s_refresh_error_total, s_duplicate_refresh_total);
     }
+
+    return time_ready;
 }
 
 static bool flow_animation_due(const time_snapshot_t *snapshot)
@@ -530,7 +564,6 @@ static void display_task(void *arg)
     uint32_t boot_animation_cycle = 0;
     display_mode_t mode = DISPLAY_MODE_BOOT;
     network_notice_t pending_notice = NETWORK_NOTICE_NONE;
-    bool boot_failure_shown = false;
 
     for (;;) {
         const EventBits_t events =
@@ -547,70 +580,47 @@ static void display_task(void *arg)
 
         if (mode == DISPLAY_MODE_BOOT) {
             const TickType_t now = xTaskGetTickCount();
+            const uint32_t cycle_elapsed_ms =
+                (uint32_t)((now - cycle_started) * portTICK_PERIOD_MS);
             if ((int32_t)(now - next_frame) >= 0) {
-                render_startup_frame(startup_frame++);
+                startup_frame = startup_frame_for_elapsed(cycle_elapsed_ms);
+                render_startup_frame(startup_frame);
                 next_frame = now + frame_period;
             }
 
-            const uint32_t cycle_elapsed_ms =
-                (uint32_t)((now - cycle_started) * portTICK_PERIOD_MS);
-            if (cycle_elapsed_ms < BOOT_MIN_DURATION_MS) continue;
+            if (cycle_elapsed_ms < STARTUP_RING_LAP_DURATION_MS) continue;
 
-            cycle_started += pdMS_TO_TICKS(BOOT_MIN_DURATION_MS);
+            cycle_started += pdMS_TO_TICKS(STARTUP_RING_LAP_DURATION_MS);
             boot_animation_cycle++;
             const bool time_ready = time_snapshot_is_ready();
-            const bool third_cycle_without_network =
-                boot_animation_cycle >= BOOT_ANIMATION_CYCLE_COUNT &&
-                !s_network_connected;
+            const bool boot_timed_out_without_time_source =
+                !time_ready && boot_animation_cycle >= BOOT_ANIMATION_CYCLE_COUNT;
+            const bool boot_ready_for_main = time_ready || s_network_seen ||
+                                             boot_timed_out_without_time_source;
 
-            if (!time_ready && !s_network_connected &&
-                third_cycle_without_network && !boot_failure_shown) {
-                render_startup_fade_out(startup_frame);
+            if (!boot_ready_for_main) {
+                continue;
+            }
+
+            render_startup_fade_out(startup_frame);
+            if (pending_notice == NETWORK_NOTICE_SUCCESS || s_network_connected) {
+                render_network_success();
+                vTaskDelay(pdMS_TO_TICKS(DISPLAY_NOTICE_DURATION_MS));
+            } else if (boot_timed_out_without_time_source) {
                 render_network_failure();
-                boot_failure_shown = true;
-                pending_notice = NETWORK_NOTICE_NONE;
                 vTaskDelay(pdMS_TO_TICKS(DISPLAY_NOTICE_DURATION_MS));
-                next_frame = xTaskGetTickCount();
-                continue;
             }
-
-            const bool failure_notice_allowed =
-                pending_notice != NETWORK_NOTICE_FAILURE ||
-                boot_animation_cycle >= BOOT_ANIMATION_CYCLE_COUNT;
-            if (pending_notice != NETWORK_NOTICE_NONE && failure_notice_allowed) {
-                render_startup_fade_out(startup_frame);
-                if (pending_notice == NETWORK_NOTICE_SUCCESS) {
-                    render_network_success();
-                } else {
-                    render_network_failure();
-                }
-                pending_notice = NETWORK_NOTICE_NONE;
-                vTaskDelay(pdMS_TO_TICKS(DISPLAY_NOTICE_DURATION_MS));
-                next_frame = xTaskGetTickCount();
-                if (time_ready) {
-                    mode = DISPLAY_MODE_MAIN;
-                }
-                continue;
-            }
-
-            if (time_ready) {
-                render_startup_fade_out(startup_frame);
-                pending_notice = NETWORK_NOTICE_NONE;
-                mode = DISPLAY_MODE_MAIN;
-            }
+            pending_notice = NETWORK_NOTICE_NONE;
+            next_frame = xTaskGetTickCount();
+            mode = DISPLAY_MODE_MAIN;
+            continue;
         }
 
         time_snapshot_t snapshot = {0};
-        time_snapshot_get(&snapshot);
-        time_t now = time(NULL);
-        if (now != (time_t)-1) {
-            localtime_r(&now, &snapshot.local_time);
-            snapshot.unix_time = now;
-        }
-        if (flow_animation_due(&snapshot)) {
+        const bool time_ready = render_normal(boot_started, &snapshot);
+        if (time_ready && flow_animation_due(&snapshot)) {
             flow_animation();
         }
-        render_normal();
     }
 }
 
@@ -662,6 +672,7 @@ void app_display_set_brightness(uint8_t brightness_percent)
 void app_display_set_network_connected(bool connected)
 {
     s_network_connected = connected;
+    if (connected) s_network_seen = true;
 }
 
 void app_display_show_network_success(void)
