@@ -1,12 +1,23 @@
 #include "ws2812_matrix.h"
 #include <string.h>
 #include "driver/gpio.h"
+#include "driver/rmt_encoder.h"
+#include "driver/rmt_tx.h"
 #include "esp_rom_sys.h"
-#include "led_strip.h"
-#include "led_strip_rmt.h"
+#include "esp_timer.h"
 
 #define WS2812_GPIO GPIO_NUM_10
-static led_strip_handle_t s_strip;
+#define WS2812_RESOLUTION_HZ 10000000U
+#define WS2812_TX_TIMEOUT_MS 25U
+#define WS2812_TX_BYTES (MATRIX_PIXELS * 3)
+#define WS2812_RECOVERY_BACKOFF_INITIAL_MS 100U
+#define WS2812_RECOVERY_BACKOFF_MAX_MS 2000U
+static rmt_channel_handle_t s_rmt_channel;
+static rmt_encoder_handle_t s_bytes_encoder;
+static uint8_t s_tx_buf[WS2812_TX_BYTES];
+static ws2812_refresh_diagnostics_t s_refresh_diag;
+static int64_t s_retry_not_before_us;
+static uint32_t s_recovery_backoff_ms;
 /* 在原物理补偿基础上将完整逻辑画面再旋转 180 度，逐列同向排列。 */
 static matrix_mapping_t s_map = {
     .serpentine = false,
@@ -32,6 +43,47 @@ static uint32_t frame_crc32(void)
     return ~crc;
 }
 
+static esp_err_t create_rmt_resources(void)
+{
+    const rmt_tx_channel_config_t channel_config = {
+        .gpio_num = WS2812_GPIO,
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = WS2812_RESOLUTION_HZ,
+        .mem_block_symbols = 64,
+        .trans_queue_depth = 1,
+        .flags.with_dma = true,
+    };
+    esp_err_t err = rmt_new_tx_channel(&channel_config, &s_rmt_channel);
+    if (err != ESP_OK) return err;
+
+    const rmt_bytes_encoder_config_t encoder_config = {
+        .bit0 = {.level0 = 1, .duration0 = 3, .level1 = 0, .duration1 = 9},
+        .bit1 = {.level0 = 1, .duration0 = 9, .level1 = 0, .duration1 = 3},
+        .flags.msb_first = 1,
+    };
+    err = rmt_new_bytes_encoder(&encoder_config, &s_bytes_encoder);
+    if (err != ESP_OK) {
+        rmt_del_channel(s_rmt_channel);
+        s_rmt_channel = NULL;
+    }
+    return err;
+}
+
+static void destroy_rmt_resources(void)
+{
+    if (s_rmt_channel != NULL) {
+        (void)rmt_disable(s_rmt_channel);
+    }
+    if (s_bytes_encoder != NULL) {
+        (void)rmt_del_encoder(s_bytes_encoder);
+        s_bytes_encoder = NULL;
+    }
+    if (s_rmt_channel != NULL) {
+        (void)rmt_del_channel(s_rmt_channel);
+        s_rmt_channel = NULL;
+    }
+}
+
 esp_err_t ws2812_matrix_init(void)
 {
     esp_err_t err = gpio_set_direction(WS2812_GPIO, GPIO_MODE_OUTPUT);
@@ -42,14 +94,7 @@ esp_err_t ws2812_matrix_init(void)
     if (err != ESP_OK) return err;
     esp_rom_delay_us(300);
 
-    led_strip_config_t cfg = {.strip_gpio_num = WS2812_GPIO, .max_leds = MATRIX_PIXELS,
-                               .led_pixel_format = LED_PIXEL_FORMAT_GRB,
-                               .led_model = LED_MODEL_WS2812,
-                               .flags.invert_out = false};
-    led_strip_rmt_config_t rmt = {.clk_src = RMT_CLK_SRC_DEFAULT,
-                                   .resolution_hz = 10 * 1000 * 1000,
-                                   .flags.with_dma = true};
-    err = led_strip_new_rmt_device(&cfg, &rmt, &s_strip);
+    err = create_rmt_resources();
     if (err != ESP_OK) return err;
 
     s_displayed_frame_valid = false;
@@ -88,9 +133,81 @@ void ws2812_matrix_set_pixel(uint8_t x, uint8_t y, uint8_t r, uint8_t g, uint8_t
 }
 void ws2812_matrix_clear(void) { memset(s_frame, 0, sizeof(s_frame)); }
 
+static esp_err_t transmit_frame_once(void)
+{
+    esp_err_t err = rmt_enable(s_rmt_channel);
+    if (err != ESP_OK) return err;
+
+    const rmt_transmit_config_t tx_config = {.loop_count = 0};
+    err = rmt_transmit(s_rmt_channel, s_bytes_encoder, s_tx_buf,
+                       sizeof(s_tx_buf), &tx_config);
+    if (err == ESP_OK) {
+        err = rmt_tx_wait_all_done(s_rmt_channel, WS2812_TX_TIMEOUT_MS);
+    }
+    if (err == ESP_ERR_TIMEOUT) {
+        s_refresh_diag.last_error = ESP_ERR_TIMEOUT;
+    }
+    (void)rmt_disable(s_rmt_channel);
+    /* The line is low after transmission; keep it low for the WS2812 latch. */
+    esp_rom_delay_us(300);
+    return err;
+}
+
+static esp_err_t transmit_frame_with_recovery(void)
+{
+    const int64_t now_us = esp_timer_get_time();
+    if (now_us < s_retry_not_before_us) {
+        s_refresh_diag.last_error = ESP_ERR_TIMEOUT;
+        return ESP_ERR_TIMEOUT;
+    }
+
+    esp_err_t err = transmit_frame_once();
+    if (err == ESP_OK) {
+        s_recovery_backoff_ms = 0;
+        s_retry_not_before_us = 0;
+        return ESP_OK;
+    }
+
+    s_refresh_diag.error_count++;
+    s_refresh_diag.last_error = err;
+    destroy_rmt_resources();
+    esp_err_t recovery_err = create_rmt_resources();
+    if (recovery_err != ESP_OK) {
+        s_refresh_diag.recovery_count++;
+        s_refresh_diag.last_error = recovery_err;
+        s_recovery_backoff_ms = s_recovery_backoff_ms == 0
+                                    ? WS2812_RECOVERY_BACKOFF_INITIAL_MS
+                                    : s_recovery_backoff_ms * 2U;
+        if (s_recovery_backoff_ms > WS2812_RECOVERY_BACKOFF_MAX_MS) {
+            s_recovery_backoff_ms = WS2812_RECOVERY_BACKOFF_MAX_MS;
+        }
+        s_retry_not_before_us = esp_timer_get_time() +
+                                ((int64_t)s_recovery_backoff_ms * 1000);
+        return recovery_err;
+    }
+    s_refresh_diag.recovery_count++;
+    err = transmit_frame_once();
+    if (err != ESP_OK) {
+        s_refresh_diag.error_count++;
+        s_refresh_diag.last_error = err;
+        s_recovery_backoff_ms = s_recovery_backoff_ms == 0
+                                    ? WS2812_RECOVERY_BACKOFF_INITIAL_MS
+                                    : s_recovery_backoff_ms * 2U;
+        if (s_recovery_backoff_ms > WS2812_RECOVERY_BACKOFF_MAX_MS) {
+            s_recovery_backoff_ms = WS2812_RECOVERY_BACKOFF_MAX_MS;
+        }
+        s_retry_not_before_us = esp_timer_get_time() +
+                                ((int64_t)s_recovery_backoff_ms * 1000);
+    } else {
+        s_recovery_backoff_ms = 0;
+        s_retry_not_before_us = 0;
+    }
+    return err;
+}
+
 static esp_err_t show_frame(uint8_t brightness_percent, bool force)
 {
-    if (!s_strip) return ESP_ERR_INVALID_STATE;
+    if (s_rmt_channel == NULL || s_bytes_encoder == NULL) return ESP_ERR_INVALID_STATE;
     if (brightness_percent > 100) brightness_percent = 100;
 
     if (!force && s_displayed_frame_valid &&
@@ -101,13 +218,17 @@ static esp_err_t show_frame(uint8_t brightness_percent, bool force)
 
     for (int i = 0; i < MATRIX_PIXELS; ++i) {
         uint8_t scale = brightness_percent;
-        esp_err_t err = led_strip_set_pixel(s_strip, i,
-                                             (s_frame[i][0] * scale) / 100,
-                                             (s_frame[i][1] * scale) / 100,
-                                             (s_frame[i][2] * scale) / 100);
-        if (err != ESP_OK) return err;
+        /* The WS2812 wire order is GRB while the logical frame is RGB. */
+        s_tx_buf[i * 3 + 0] = (uint8_t)((s_frame[i][1] * scale) / 100);
+        s_tx_buf[i * 3 + 1] = (uint8_t)((s_frame[i][0] * scale) / 100);
+        s_tx_buf[i * 3 + 2] = (uint8_t)((s_frame[i][2] * scale) / 100);
     }
-    esp_err_t err = led_strip_refresh(s_strip);
+
+    const int64_t started_us = esp_timer_get_time();
+    esp_err_t err = transmit_frame_with_recovery();
+    const int64_t elapsed_us = esp_timer_get_time() - started_us;
+    s_refresh_diag.last_refresh_ms = (uint32_t)((elapsed_us + 999) / 1000);
+    s_refresh_diag.last_refresh_ok = err == ESP_OK;
     if (err != ESP_OK) return err;
 
     memcpy(s_displayed_frame, s_frame, sizeof(s_frame));
@@ -151,4 +272,10 @@ void ws2812_matrix_get_frame_diagnostics(ws2812_frame_diagnostics_t *out)
             return;
         }
     }
+}
+
+void ws2812_matrix_get_refresh_diagnostics(ws2812_refresh_diagnostics_t *out)
+{
+    if (out == NULL) return;
+    *out = s_refresh_diag;
 }

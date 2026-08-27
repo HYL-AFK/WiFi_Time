@@ -11,6 +11,7 @@
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 
 #include "app_log.h"
@@ -40,6 +41,10 @@ static const char *TAG = "wifi_manager";
 #define WIFI_FAST_RETRY_DELAY_MS 1000
 #define WIFI_BACKGROUND_RETRY_DELAY_MS 10000
 #define WIFI_RESCAN_FAILURE_THRESHOLD 2
+#define WIFI_STA_CONNECT_TIMEOUT_MS 15000
+#define WIFI_STA_TIMEOUT_DISCONNECT_GRACE_MS 2000
+#define WIFI_STA_GUARD_PERIOD_MS 1000
+#define WIFI_LOCAL_CONNECT_TIMEOUT_REASON (-1)
 
 typedef enum {
     WIFI_STA_STATE_IDLE = 0,
@@ -80,12 +85,51 @@ static char s_preferred_fallback_ssid[WIFI_SSID_MAX_LEN + 1] = "";
 static bool s_last_connected_seen_in_scan = false;
 static wifi_ap_record_t s_last_connected_scan_ap;
 static TaskHandle_t s_reconnect_task = NULL;
+static bool s_timeout_recovery_pending;
+static TickType_t s_sta_state_tick;
+typedef enum {
+    WIFI_WORK_GOT_IP = 1,
+    WIFI_WORK_DISCONNECTED,
+    WIFI_WORK_AP_START,
+    WIFI_WORK_AP_STOP,
+} wifi_event_work_type_t;
+
+typedef struct {
+    wifi_event_work_type_t type;
+    int reason;
+    uint32_t failure_count;
+    bool count_failure;
+    bool intentional_switch;
+    int rssi;
+    int channel;
+    char ssid[WIFI_SSID_MAX_LEN + 1];
+    ip_event_got_ip_t got_ip;
+} wifi_event_work_item_t;
+
+static QueueHandle_t s_wifi_event_work_queue;
+static TaskHandle_t s_wifi_event_work_task_handle;
 
 static void update_ap_ip_cache(void);
 static void schedule_sta_reconnect(void);
 static void connect_saved_sta(const app_config_t *cfg, bool force_scan);
 static esp_err_t start_sta_with_config(const wifi_config_t *sta_cfg,
                                        const char *context);
+static void sta_connect_guard_task(void *arg);
+static void wifi_event_work_task(void *arg);
+static void log_ap_network_info(void);
+static void log_sta_network_info(const ip_event_got_ip_t *event);
+static bool refresh_sta_runtime_info(wifi_ap_record_t *ap);
+static bool apply_pending_sta_config(void);
+
+static bool enqueue_wifi_event_work(const wifi_event_work_item_t *item)
+{
+    if (s_wifi_event_work_queue == NULL || item == NULL) return false;
+    if (xQueueSend(s_wifi_event_work_queue, item, 0) != pdTRUE) {
+        APP_LOGW(TAG, "Wi-Fi event work queue full, type=%d", (int)item->type);
+        return false;
+    }
+    return true;
+}
 
 static const char *wifi_sta_state_to_str(wifi_sta_state_t state)
 {
@@ -217,7 +261,7 @@ static void notify_status_changed(void)
     }
 }
 
-static uint32_t record_sta_connection_failure(const char *context)
+static uint32_t record_sta_connection_failure(const char *context, bool notify)
 {
     portENTER_CRITICAL(&s_sta_state_lock);
     if (s_consecutive_sta_failures < UINT32_MAX) {
@@ -228,8 +272,77 @@ static uint32_t record_sta_connection_failure(const char *context)
 
     APP_LOGW(TAG, "STA consecutive connection failures=%" PRIu32 " context=%s",
              count, context);
-    notify_status_changed();
+    if (notify) notify_status_changed();
     return count;
+}
+
+static void wifi_event_work_task(void *arg)
+{
+    (void)arg;
+    wifi_event_work_item_t item;
+    for (;;) {
+        if (xQueueReceive(s_wifi_event_work_queue, &item, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        switch (item.type) {
+        case WIFI_WORK_GOT_IP:
+            /* Publish the connected edge first so SNTP/location/weather start promptly. */
+            notify_status_changed();
+            runtime_event_log_append(RUNTIME_EVENT_WIFI_CONNECTED,
+                                     item.rssi, item.channel, 0);
+            refresh_sta_runtime_info(NULL);
+            strlcpy(s_last_connected_ssid, item.ssid, sizeof(s_last_connected_ssid));
+            strlcpy(s_preferred_fallback_ssid, item.ssid,
+                    sizeof(s_preferred_fallback_ssid));
+            if (!s_saved_cfg.has_last_wifi_ssid ||
+                strcmp(s_saved_cfg.last_wifi_ssid, item.ssid) != 0) {
+                esp_err_t save_err = app_config_save_last_wifi_ssid(item.ssid);
+                if (save_err == ESP_OK) {
+                    strlcpy(s_saved_cfg.last_wifi_ssid, item.ssid,
+                            sizeof(s_saved_cfg.last_wifi_ssid));
+                    s_saved_cfg.has_last_wifi_ssid = true;
+                }
+            }
+            log_sta_network_info(&item.got_ip);
+            break;
+
+        case WIFI_WORK_DISCONNECTED: {
+            uint32_t failure_count = item.failure_count;
+            if (item.count_failure) {
+                failure_count = record_sta_connection_failure("disconnect event", true);
+            }
+            if (item.count_failure &&
+                (failure_count == 1U || failure_count == 3U)) {
+                runtime_event_log_append(RUNTIME_EVENT_WIFI_FAILURE,
+                                         (int32_t)failure_count,
+                                         item.reason, 0);
+            }
+            if (!item.count_failure) notify_status_changed();
+            if (apply_pending_sta_config()) {
+                APP_LOGI(TAG, "intentional STA switch continues without delayed reconnect");
+            } else if (s_sta_reconnect_enabled) {
+                const uint32_t failures = get_sta_failure_count();
+                const uint32_t delay_ms = failures >= 3U
+                                              ? WIFI_BACKGROUND_RETRY_DELAY_MS
+                                              : WIFI_FAST_RETRY_DELAY_MS;
+                APP_LOGI(TAG, "STA reconnect scheduled in %" PRIu32 " ms", delay_ms);
+                schedule_sta_reconnect();
+            }
+            break;
+        }
+
+        case WIFI_WORK_AP_START:
+            log_ap_network_info();
+            notify_status_changed();
+            break;
+        case WIFI_WORK_AP_STOP:
+            notify_status_changed();
+            break;
+        default:
+            break;
+        }
+    }
 }
 
 static void format_mac_string(const uint8_t mac[6], char *out, size_t out_size)
@@ -367,6 +480,85 @@ static void sta_reconnect_task(void *arg)
     vTaskDelete(NULL);
 }
 
+static void sta_connect_guard_task(void *arg)
+{
+    (void)arg;
+
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(WIFI_STA_GUARD_PERIOD_MS));
+        if (!s_wifi_running || !s_sta_reconnect_enabled) {
+            continue;
+        }
+
+        const TickType_t now = xTaskGetTickCount();
+        wifi_sta_state_t state;
+        TickType_t state_tick;
+        bool timeout_recovery_pending;
+        portENTER_CRITICAL(&s_sta_state_lock);
+        state = s_sta_state;
+        state_tick = s_sta_state_tick;
+        timeout_recovery_pending = s_timeout_recovery_pending;
+        portEXIT_CRITICAL(&s_sta_state_lock);
+
+        const TickType_t elapsed = now - state_tick;
+        if ((state == WIFI_STA_STATE_CONNECTING ||
+             state == WIFI_STA_STATE_WAIT_IP) &&
+            !timeout_recovery_pending &&
+            elapsed >= pdMS_TO_TICKS(WIFI_STA_CONNECT_TIMEOUT_MS)) {
+            portENTER_CRITICAL(&s_sta_state_lock);
+            if ((s_sta_state == WIFI_STA_STATE_CONNECTING ||
+                 s_sta_state == WIFI_STA_STATE_WAIT_IP) &&
+                !s_timeout_recovery_pending) {
+                s_sta_state = WIFI_STA_STATE_SWITCHING;
+                s_sta_state_tick = now;
+                s_timeout_recovery_pending = true;
+                timeout_recovery_pending = true;
+            }
+            portEXIT_CRITICAL(&s_sta_state_lock);
+
+            if (timeout_recovery_pending) {
+                const uint32_t failure_count =
+                    record_sta_connection_failure("connect timeout", true);
+                APP_LOGW(TAG,
+                         "STA connect timeout after %u ms, state=%s, failures=%" PRIu32,
+                         WIFI_STA_CONNECT_TIMEOUT_MS,
+                         wifi_sta_state_to_str(state),
+                         failure_count);
+                runtime_event_log_append(RUNTIME_EVENT_WIFI_FAILURE,
+                                         (int32_t)failure_count,
+                                         WIFI_LOCAL_CONNECT_TIMEOUT_REASON,
+                                         0);
+                esp_err_t err = esp_wifi_disconnect();
+                if (err != ESP_OK) {
+                    APP_LOG_ERR(TAG, err,
+                                "timeout recovery disconnect failed; scheduling retry");
+                    portENTER_CRITICAL(&s_sta_state_lock);
+                    s_timeout_recovery_pending = false;
+                    s_sta_state = WIFI_STA_STATE_IDLE;
+                    s_sta_state_tick = now;
+                    portEXIT_CRITICAL(&s_sta_state_lock);
+                    schedule_sta_reconnect();
+                }
+            }
+        } else if (state == WIFI_STA_STATE_SWITCHING &&
+                   timeout_recovery_pending &&
+                   elapsed >= pdMS_TO_TICKS(WIFI_STA_TIMEOUT_DISCONNECT_GRACE_MS)) {
+            APP_LOGW(TAG,
+                     "timeout recovery disconnect event missing after %u ms; continuing reconnect",
+                     WIFI_STA_TIMEOUT_DISCONNECT_GRACE_MS);
+            portENTER_CRITICAL(&s_sta_state_lock);
+            if (s_timeout_recovery_pending &&
+                s_sta_state == WIFI_STA_STATE_SWITCHING) {
+                s_timeout_recovery_pending = false;
+                s_sta_state = WIFI_STA_STATE_IDLE;
+                s_sta_state_tick = now;
+            }
+            portEXIT_CRITICAL(&s_sta_state_lock);
+            schedule_sta_reconnect();
+        }
+    }
+}
+
 static void schedule_sta_reconnect(void)
 {
     if (s_reconnect_task != NULL) {
@@ -482,14 +674,19 @@ static esp_err_t start_sta_with_config(const wifi_config_t *sta_cfg,
     s_active_sta_config = *sta_cfg;
     s_active_sta_config_valid = true;
     s_sta_state = WIFI_STA_STATE_CONNECTING;
+    s_sta_state_tick = xTaskGetTickCount();
+    s_timeout_recovery_pending = false;
     portEXIT_CRITICAL(&s_sta_state_lock);
     strlcpy(s_sta_ssid, (const char *)sta_cfg->sta.ssid, sizeof(s_sta_ssid));
     err = esp_wifi_connect();
     if (err != ESP_OK) {
         set_sta_state(WIFI_STA_STATE_IDLE);
+        portENTER_CRITICAL(&s_sta_state_lock);
+        s_timeout_recovery_pending = false;
+        portEXIT_CRITICAL(&s_sta_state_lock);
         APP_LOG_ERR(TAG, err, "start STA connect failed, context=%s", context);
         if (s_sta_reconnect_enabled) {
-            (void)record_sta_connection_failure("esp_wifi_connect");
+            (void)record_sta_connection_failure("esp_wifi_connect", true);
         }
         return err;
     }
@@ -555,14 +752,10 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
             s_sta_reconnect_enabled &&
             previous_state != WIFI_STA_STATE_SWITCHING &&
             (event == NULL || event->reason != WIFI_REASON_ASSOC_LEAVE);
-        APP_LOGW(TAG, "STA disconnected, previous_state=%s reason=%d(%s), hint=%s, reconnect=%d, saved=%d",
-                 wifi_sta_state_to_str(previous_state),
-                 event != NULL ? event->reason : -1,
-                 event != NULL ? wifi_disconnect_reason_to_str(event->reason) : "UNKNOWN",
-                 event != NULL ? wifi_disconnect_reason_hint(event->reason) : "-",
-                 s_sta_reconnect_enabled ? 1 : 0,
-                 (s_saved_cfg.has_wifi && s_saved_cfg.wifi_count > 0) ? 1 : 0);
         set_sta_state(WIFI_STA_STATE_IDLE);
+        portENTER_CRITICAL(&s_sta_state_lock);
+        s_timeout_recovery_pending = false;
+        portEXIT_CRITICAL(&s_sta_state_lock);
         s_sta_connected = false;
         s_sta_rssi = -127;
         s_sta_channel = 0;
@@ -570,32 +763,20 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         s_sta_ssid[0] = '\0';
         strlcpy(s_sta_ip_str, "0.0.0.0", sizeof(s_sta_ip_str));
         if (count_connection_failure) {
-            (void)record_sta_connection_failure("disconnect event");
+            wifi_event_work_item_t work = {
+                .type = WIFI_WORK_DISCONNECTED,
+                .reason = event != NULL ? event->reason : -1,
+                .count_failure = true,
+            };
+            (void)enqueue_wifi_event_work(&work);
         } else {
-            notify_status_changed();
-        }
-        if (count_connection_failure) {
-            const uint32_t failure_count = get_sta_failure_count();
-            /* Persist only the first and third failures; background retries stay in RAM. */
-            if (failure_count == 1U || failure_count == 3U) {
-                runtime_event_log_append(RUNTIME_EVENT_WIFI_FAILURE,
-                                         (int32_t)failure_count,
-                                         event != NULL ? (int32_t)event->reason : -1,
-                                         0);
-            }
-        }
-        if (apply_pending_sta_config())
-        {
-            APP_LOGI(TAG, "intentional STA switch continues without delayed reconnect");
-        }
-        else if (s_sta_reconnect_enabled)
-        {
-            const uint32_t failures = get_sta_failure_count();
-            const uint32_t delay_ms = failures >= 3U
-                                          ? WIFI_BACKGROUND_RETRY_DELAY_MS
-                                          : WIFI_FAST_RETRY_DELAY_MS;
-            APP_LOGI(TAG, "STA reconnect scheduled in %" PRIu32 " ms", delay_ms);
-            schedule_sta_reconnect();
+            wifi_event_work_item_t work = {
+                .type = WIFI_WORK_DISCONNECTED,
+                .reason = event != NULL ? event->reason : -1,
+                .count_failure = false,
+                .intentional_switch = previous_state == WIFI_STA_STATE_SWITCHING,
+            };
+            (void)enqueue_wifi_event_work(&work);
         }
     }
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_START)
@@ -603,15 +784,16 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         /* AP 热点已经启动，手机应能扫描到 s_ap_name。 */
         s_ap_started = true;
         APP_LOGI(TAG, "AP start, ssid=%s", s_ap_name);
-        log_ap_network_info();
-        notify_status_changed();
+        wifi_event_work_item_t work = {.type = WIFI_WORK_AP_START};
+        (void)enqueue_wifi_event_work(&work);
     }
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STOP)
     {
         /* AP 热点停止，通常不应该在正常 APSTA 模式下频繁出现。 */
         s_ap_started = false;
         APP_LOGW(TAG, "AP stop");
-        notify_status_changed();
+        wifi_event_work_item_t work = {.type = WIFI_WORK_AP_STOP};
+        (void)enqueue_wifi_event_work(&work);
     }
     else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
     {
@@ -622,26 +804,14 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         portENTER_CRITICAL(&s_sta_state_lock);
         s_consecutive_sta_failures = 0;
         portEXIT_CRITICAL(&s_sta_state_lock);
+        if (event == NULL) return;
         esp_ip4addr_ntoa(&event->ip_info.ip, s_sta_ip_str, sizeof(s_sta_ip_str));
-        APP_LOGI(TAG, "STA got IP: %s", s_sta_ip_str);
-        runtime_event_log_append(RUNTIME_EVENT_WIFI_CONNECTED,
-                                 s_sta_rssi,
-                                 s_sta_channel,
-                                 0);
-        refresh_sta_runtime_info(NULL);
-        strlcpy(s_last_connected_ssid, s_sta_ssid, sizeof(s_last_connected_ssid));
-        strlcpy(s_preferred_fallback_ssid, s_sta_ssid, sizeof(s_preferred_fallback_ssid));
-        if (!s_saved_cfg.has_last_wifi_ssid ||
-            strcmp(s_saved_cfg.last_wifi_ssid, s_sta_ssid) != 0) {
-            esp_err_t save_err = app_config_save_last_wifi_ssid(s_sta_ssid);
-            if (save_err == ESP_OK) {
-                strlcpy(s_saved_cfg.last_wifi_ssid, s_sta_ssid,
-                        sizeof(s_saved_cfg.last_wifi_ssid));
-                s_saved_cfg.has_last_wifi_ssid = true;
-            }
-        }
-        log_sta_network_info(event);
-        notify_status_changed();
+        wifi_event_work_item_t work = {.type = WIFI_WORK_GOT_IP,
+                                       .rssi = s_sta_rssi,
+                                       .channel = s_sta_channel};
+        strlcpy(work.ssid, s_sta_ssid, sizeof(work.ssid));
+        if (event != NULL) work.got_ip = *event;
+        (void)enqueue_wifi_event_work(&work);
     }
     else if (event_base == IP_EVENT && event_id == IP_EVENT_AP_STAIPASSIGNED)
     {
@@ -714,6 +884,19 @@ esp_err_t wifi_manager_init(const app_config_t *cfg)
     err = esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL);
     if (err != ESP_OK) return err;
 
+    s_wifi_event_work_queue = xQueueCreate(8, sizeof(wifi_event_work_item_t));
+    if (s_wifi_event_work_queue == NULL) {
+        APP_LOGE(TAG, "create Wi-Fi event work queue failed");
+        return ESP_ERR_NO_MEM;
+    }
+    if (xTaskCreate(wifi_event_work_task, "wifi_event_work", 4096, NULL, 4,
+                    &s_wifi_event_work_task_handle) != pdPASS) {
+        APP_LOGE(TAG, "create Wi-Fi event work task failed");
+        vQueueDelete(s_wifi_event_work_queue);
+        s_wifi_event_work_queue = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
     wifi_config_t ap_cfg = {0};
     build_ap_config(&ap_cfg);
     err = esp_wifi_set_mode(WIFI_MODE_APSTA);
@@ -736,6 +919,15 @@ esp_err_t wifi_manager_init(const app_config_t *cfg)
     s_wifi_running = true;
     update_ap_ip_cache();
     s_inited = true;
+    if (xTaskCreate(sta_connect_guard_task,
+                   "sta_guard",
+                   3072,
+                   NULL,
+                   5,
+                   NULL) != pdPASS) {
+        APP_LOGE(TAG, "create STA connection guard task failed");
+        return ESP_ERR_NO_MEM;
+    }
     return ESP_OK;
 }
 /*
@@ -1185,6 +1377,7 @@ void wifi_manager_enable_sta_reconnect(bool enable)
     if (!enable) {
         portENTER_CRITICAL(&s_sta_state_lock);
         s_connect_generation++;
+        s_timeout_recovery_pending = false;
         portEXIT_CRITICAL(&s_sta_state_lock);
     }
 }
@@ -1206,6 +1399,7 @@ void wifi_manager_disconnect_sta(void)
     s_consecutive_sta_failures = 0;
     s_pending_sta_config_valid = false;
     s_active_sta_config_valid = false;
+    s_timeout_recovery_pending = false;
     s_connect_generation++;
     wifi_sta_state_t previous_state = s_sta_state;
     if (s_sta_state != WIFI_STA_STATE_IDLE) {
@@ -1285,6 +1479,11 @@ bool wifi_manager_is_ap_started(void)
 uint32_t wifi_manager_get_sta_failure_count(void)
 {
     return get_sta_failure_count();
+}
+
+TaskHandle_t wifi_manager_get_event_work_task_handle(void)
+{
+    return s_wifi_event_work_task_handle;
 }
 
 int wifi_manager_get_sta_rssi(void)

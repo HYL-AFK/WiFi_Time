@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <time.h>
 
 #include "freertos/FreeRTOS.h"
@@ -13,6 +14,7 @@
 #include "esp_timer.h"
 
 #include "common/app_log.h"
+#include "common/runtime_event_log.h"
 #include "common/time_snapshot.h"
 #include "common/weather_snapshot.h"
 #include "drivers/ws2812_matrix.h"
@@ -53,6 +55,8 @@
 #define SECONDS_X 15
 #define SECONDS_Y 0
 #define SECONDS_H 15
+#define DISPLAY_STATUS_LAMP_X 15
+#define DISPLAY_STATUS_LAMP_Y 15
 
 #define MATRIX_BRIGHTNESS_HIGH 60
 #define MATRIX_BRIGHTNESS_LOW 20
@@ -63,6 +67,18 @@
 #define DISPLAY_RED_R 100
 #define DISPLAY_RED_G 8
 #define DISPLAY_RED_B 8
+#define DISPLAY_BLUE_R 8
+#define DISPLAY_BLUE_G 30
+#define DISPLAY_BLUE_B 100
+#define DISPLAY_CYAN_R 0
+#define DISPLAY_CYAN_G 95
+#define DISPLAY_CYAN_B 95
+#define DISPLAY_PINK_R 100
+#define DISPLAY_PINK_G 20
+#define DISPLAY_PINK_B 65
+#define DISPLAY_NORMAL_R DISPLAY_GREEN_R
+#define DISPLAY_NORMAL_G DISPLAY_GREEN_G
+#define DISPLAY_NORMAL_B DISPLAY_GREEN_B
 #define DISPLAY_REFRESH_PERIOD_MS 50
 #define STARTUP_FRAME_PERIOD_MS 50
 #define STARTUP_RING_TRAIL_LENGTH 5
@@ -77,6 +93,10 @@
 #define WS2812_DIAGNOSTIC_INTERVAL 60
 #define WS2812_KEEPALIVE_REFRESH_MS 250
 #define DISPLAY_REFRESH_WARN_US 20000
+#define DISPLAY_STATUS_BLINK_COUNT 2
+#define DISPLAY_STATUS_BLINK_HALF_PERIOD_MS 250
+#define DISPLAY_STATUS_BREATH_PERIOD_MS 1600
+#define DISPLAY_SUMMARY_INTERVAL_MS 60000
 
 static EventGroupHandle_t s_events;
 static int64_t s_last_flow_minute = -1;
@@ -90,9 +110,21 @@ static bool s_last_main_crc_valid;
 static bool s_last_output_main;
 static bool s_network_connected;
 static bool s_network_seen;
+static bool s_bluetooth_connected;
+static bool s_weather_fetching;
+static bool s_wifi_fault;
+static bool s_weather_fault;
+static portMUX_TYPE s_status_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_blink_active;
+static uint8_t s_blink_color;
+static TickType_t s_blink_started;
 static volatile uint8_t s_brightness_percent = MATRIX_BRIGHTNESS_HIGH;
 static TaskHandle_t s_display_task_handle;
 static TickType_t s_last_main_force_refresh;
+static portMUX_TYPE s_health_lock = portMUX_INITIALIZER_UNLOCKED;
+static app_display_health_t s_display_health;
+static uint32_t s_next_animation_id;
+static bool s_recovery_requested;
 static const char *TAG = "app_display";
 
 typedef enum {
@@ -106,16 +138,40 @@ typedef enum {
     NETWORK_NOTICE_FAILURE,
 } network_notice_t;
 
+typedef enum {
+    STATUS_COLOR_CYAN = 0,
+    STATUS_COLOR_BLUE,
+} status_blink_color_t;
+
 typedef struct {
     uint8_t x;
     uint8_t y;
 } display_point_t;
 
+typedef struct {
+    bool active;
+    bool abort_requested;
+    uint32_t animation_id;
+    uint8_t current_frame;
+    uint8_t target_frame_count;
+    TickType_t next_frame_tick;
+    TickType_t started_at;
+    uint32_t attempted_frames;
+    uint32_t successful_frames;
+    uint32_t max_refresh_ms;
+} display_animation_state_t;
+
+static display_animation_state_t s_animation;
+
 static const display_point_t s_startup_clock_ring[] = {
-    {6, 2}, {7, 2}, {8, 2}, {9, 2}, {10, 3}, {11, 3}, {12, 4},
-    {13, 6}, {13, 7}, {13, 8}, {13, 9}, {12, 11}, {11, 12}, {10, 12},
-    {9, 13}, {8, 13}, {7, 13}, {6, 13}, {5, 12}, {4, 12}, {3, 11},
-    {2, 9}, {2, 8}, {2, 7}, {2, 6}, {3, 4}, {4, 3}, {5, 3},
+    {6, 1}, {7, 1}, {8, 1}, {9, 1},
+    {10, 2}, {11, 3}, {12, 4},
+    {13, 5}, {13, 6}, {13, 7}, {13, 8}, {13, 9}, {13, 10},
+    {12, 11}, {11, 12}, {10, 13},
+    {9, 14}, {8, 14}, {7, 14}, {6, 14},
+    {5, 13}, {4, 12}, {3, 11},
+    {2, 10}, {2, 9}, {2, 8}, {2, 7}, {2, 6}, {2, 5},
+    {3, 4}, {4, 3}, {5, 2},
 };
 
 static const uint8_t s_startup_trail_levels[STARTUP_RING_TRAIL_LENGTH] = {
@@ -242,6 +298,15 @@ static void draw_weather(const weather_snapshot_t *weather)
 
 static void draw_temperature(const weather_snapshot_t *weather)
 {
+    if (weather->network_error) {
+        for (uint8_t i = 0; i < 5; ++i) {
+            ws2812_matrix_set_pixel(TEMP_TENS_X + i, TEMP_Y + i,
+                                    DISPLAY_RED_R, DISPLAY_RED_G, DISPLAY_RED_B);
+            ws2812_matrix_set_pixel(TEMP_TENS_X + 4u - i, TEMP_Y + i,
+                                    DISPLAY_RED_R, DISPLAY_RED_G, DISPLAY_RED_B);
+        }
+        return;
+    }
     if (!weather->temperature_valid) return;
 
     int temperature = (int)(weather->temperature_c >= 0.0f ?
@@ -267,11 +332,164 @@ static void draw_temperature(const weather_snapshot_t *weather)
 
 static void draw_seconds(uint8_t seconds)
 {
-    const uint8_t lit = (uint8_t)((seconds % SECONDS_H) + 1u);
+    const uint8_t cycle = (uint8_t)(seconds / SECONDS_H);
+    const uint8_t step = (uint8_t)(seconds % SECONDS_H);
+    const uint8_t lit = (cycle & 1u) == 0u
+                            ? (uint8_t)(step + 1u)
+                            : (uint8_t)(SECONDS_H - step - 1u);
     for (uint8_t row = 0; row < lit; ++row) {
-        ws2812_matrix_set_pixel(SECONDS_X, SECONDS_Y + SECONDS_H - 1u - row,
-                                DISPLAY_WHITE, DISPLAY_WHITE, DISPLAY_WHITE);
+        const uint8_t y = (cycle & 1u) == 0u
+                              ? (uint8_t)(SECONDS_Y + SECONDS_H - 1u - row)
+                              : (uint8_t)(SECONDS_Y + row);
+        ws2812_matrix_set_pixel(SECONDS_X, y, DISPLAY_WHITE, DISPLAY_WHITE, DISPLAY_WHITE);
     }
+}
+
+static uint8_t status_breath_level(TickType_t now)
+{
+    const uint32_t phase =
+        (uint32_t)((now * portTICK_PERIOD_MS) % DISPLAY_STATUS_BREATH_PERIOD_MS);
+    const uint32_t half = DISPLAY_STATUS_BREATH_PERIOD_MS / 2U;
+    const uint32_t distance = phase <= half ? phase : DISPLAY_STATUS_BREATH_PERIOD_MS - phase;
+    return (uint8_t)(20U + (distance * 80U) / half);
+}
+
+static void draw_status_lamp(void)
+{
+    const TickType_t now = xTaskGetTickCount();
+    bool wifi_fault;
+    bool weather_fault;
+    bool bluetooth_connected;
+    bool weather_fetching;
+    bool blink_active;
+    uint8_t blink_color;
+    TickType_t blink_started;
+    portENTER_CRITICAL(&s_status_lock);
+    wifi_fault = s_wifi_fault;
+    weather_fault = s_weather_fault;
+    bluetooth_connected = s_bluetooth_connected;
+    weather_fetching = s_weather_fetching;
+    blink_active = s_blink_active;
+    blink_color = s_blink_color;
+    blink_started = s_blink_started;
+    portEXIT_CRITICAL(&s_status_lock);
+
+    uint8_t red = DISPLAY_NORMAL_R;
+    uint8_t green = DISPLAY_NORMAL_G;
+    uint8_t blue = DISPLAY_NORMAL_B;
+    uint8_t level = status_breath_level(now);
+
+    bool render_blink = false;
+    if (!wifi_fault && !weather_fault && blink_active) {
+        const uint32_t elapsed_ms = (uint32_t)((now - blink_started) * portTICK_PERIOD_MS);
+        const uint32_t phase = elapsed_ms / DISPLAY_STATUS_BLINK_HALF_PERIOD_MS;
+        if (phase >= DISPLAY_STATUS_BLINK_COUNT * 2U) {
+            portENTER_CRITICAL(&s_status_lock);
+            if (s_blink_active && s_blink_started == blink_started) {
+                s_blink_active = false;
+            }
+            portEXIT_CRITICAL(&s_status_lock);
+        } else {
+            render_blink = true;
+            if ((phase & 1U) == 0U) {
+                if (blink_color == STATUS_COLOR_BLUE) {
+                    red = DISPLAY_BLUE_R; green = DISPLAY_BLUE_G; blue = DISPLAY_BLUE_B;
+                } else {
+                    red = DISPLAY_CYAN_R; green = DISPLAY_CYAN_G; blue = DISPLAY_CYAN_B;
+                }
+            } else {
+                level = 0;
+            }
+        }
+    }
+
+    if (wifi_fault || weather_fault) {
+        red = DISPLAY_RED_R; green = DISPLAY_RED_G; blue = DISPLAY_RED_B;
+    } else if (render_blink) {
+        /* The temporary blink owns this frame; the next frame returns to the base state. */
+    } else if (bluetooth_connected) {
+        red = DISPLAY_BLUE_R; green = DISPLAY_BLUE_G; blue = DISPLAY_BLUE_B;
+    } else if (weather_fetching) {
+        red = DISPLAY_CYAN_R; green = DISPLAY_CYAN_G; blue = DISPLAY_CYAN_B;
+    } else {
+        red = DISPLAY_NORMAL_R; green = DISPLAY_NORMAL_G; blue = DISPLAY_NORMAL_B;
+    }
+
+    ws2812_matrix_set_pixel(DISPLAY_STATUS_LAMP_X, DISPLAY_STATUS_LAMP_Y,
+                            (uint8_t)((red * level) / 100U),
+                            (uint8_t)((green * level) / 100U),
+                            (uint8_t)((blue * level) / 100U));
+}
+
+static void display_record_event(runtime_event_type_t type, int32_t value1,
+                                 int32_t value2, uint32_t flags)
+{
+    (void)runtime_event_log_append(type, value1, value2, flags);
+}
+
+static void display_update_health(bool refresh_ok)
+{
+    static uint32_t recovery_seen;
+    static uint32_t error_seen;
+    ws2812_refresh_diagnostics_t diag = {0};
+    ws2812_matrix_get_refresh_diagnostics(&diag);
+    const bool new_error = diag.error_count != error_seen;
+    error_seen = diag.error_count;
+    if (diag.recovery_count != recovery_seen) {
+        recovery_seen = diag.recovery_count;
+        display_record_event(RUNTIME_EVENT_DISPLAY_ERROR,
+                             (int32_t)s_animation.current_frame,
+                             diag.last_error,
+                             refresh_ok ? DISPLAY_RMT_RECOVERY_SUCCESS
+                                         : DISPLAY_RMT_RECOVERY_FAILURE);
+    }
+    portENTER_CRITICAL(&s_health_lock);
+    s_display_health.heartbeat++;
+    s_display_health.last_progress_tick = xTaskGetTickCount();
+    s_display_health.last_refresh_tick = s_display_health.last_progress_tick;
+    s_display_health.last_refresh_ms = diag.last_refresh_ms;
+    s_display_health.animation_id = s_animation.animation_id;
+    s_display_health.animation_frame = s_animation.current_frame;
+    s_display_health.animation_active = s_animation.active;
+    s_display_health.refresh_errors = diag.error_count;
+    s_display_health.recovery_count = diag.recovery_count;
+    portEXIT_CRITICAL(&s_health_lock);
+
+    if (!refresh_ok && new_error) {
+        display_record_event(RUNTIME_EVENT_DISPLAY_ERROR,
+                             (int32_t)s_animation.current_frame,
+                             diag.last_error,
+                             diag.last_error == ESP_ERR_TIMEOUT
+                                 ? DISPLAY_REFRESH_TIMEOUT : 0);
+    }
+}
+
+static void display_heartbeat(void)
+{
+    portENTER_CRITICAL(&s_health_lock);
+    s_display_health.heartbeat++;
+    s_display_health.last_progress_tick = xTaskGetTickCount();
+    s_display_health.animation_id = s_animation.animation_id;
+    s_display_health.animation_frame = s_animation.current_frame;
+    s_display_health.animation_active = s_animation.active;
+    portEXIT_CRITICAL(&s_health_lock);
+}
+
+static void display_summary_if_due(TickType_t now)
+{
+    static TickType_t last_summary;
+    if ((TickType_t)(now - last_summary) < pdMS_TO_TICKS(DISPLAY_SUMMARY_INTERVAL_MS)) {
+        return;
+    }
+    last_summary = now;
+    app_display_health_t health;
+    app_display_get_health(&health);
+    display_record_event(RUNTIME_EVENT_DISPLAY_ERROR,
+                         (int32_t)health.animation_frame,
+                         (int32_t)health.last_refresh_ms,
+                         DISPLAY_SUMMARY |
+                             ((health.refresh_errors & 0xffU) << 16) |
+                             ((health.recovery_count & 0xffU) << 24));
 }
 
 /* WS2812 发送失败时只重试一次，避免短暂总线错误留下半帧数据。 */
@@ -284,6 +502,7 @@ static esp_err_t show_frame_with_retry(void)
         APP_LOGW(TAG, "WS2812 refresh slow: elapsed_us=%" PRId64 " err=%s",
                  elapsed_us, esp_err_to_name(err));
     }
+    display_update_health(err == ESP_OK);
     if (err == ESP_OK) {
         if (s_refresh_failures > 0U) {
             APP_LOGI(TAG, "WS2812 refresh recovered after %" PRIu32 " failed frames",
@@ -299,6 +518,7 @@ static esp_err_t show_frame_with_retry(void)
     vTaskDelay(pdMS_TO_TICKS(1));
 
     err = ws2812_matrix_show(s_brightness_percent);
+    display_update_health(err == ESP_OK);
     if (err == ESP_OK) {
         APP_LOGW(TAG, "WS2812 refresh recovered after retry");
         s_refresh_failures = 0;
@@ -316,6 +536,7 @@ static esp_err_t show_frame_force_with_retry(void)
 {
     const int64_t started_us = esp_timer_get_time();
     esp_err_t err = ws2812_matrix_show_force(s_brightness_percent);
+    display_update_health(err == ESP_OK);
     const int64_t elapsed_us = esp_timer_get_time() - started_us;
     if (elapsed_us > DISPLAY_REFRESH_WARN_US) {
         APP_LOGW(TAG, "WS2812 forced refresh slow: elapsed_us=%" PRId64 " err=%s",
@@ -328,6 +549,7 @@ static esp_err_t show_frame_force_with_retry(void)
                 s_refresh_error_total);
     vTaskDelay(pdMS_TO_TICKS(1));
     err = ws2812_matrix_show_force(s_brightness_percent);
+    display_update_health(err == ESP_OK);
     if (err != ESP_OK) {
         s_refresh_error_total++;
         APP_LOG_ERR(TAG, err, "WS2812 forced refresh retry failed, total=%" PRIu32,
@@ -463,10 +685,12 @@ static bool render_normal(TickType_t display_started, time_snapshot_t *out_snaps
     draw_weather(&weather);
     draw_temperature(&weather);
     draw_seconds((uint8_t)time_snapshot.local_time.tm_sec);
+    draw_status_lamp();
 
     ws2812_frame_diagnostics_t diag = {0};
     ws2812_matrix_get_frame_diagnostics(&diag);
-    if (!diag.grayscale) {
+    if (!diag.grayscale &&
+        !(diag.x == DISPLAY_STATUS_LAMP_X && diag.y == DISPLAY_STATUS_LAMP_Y)) {
         s_main_frame_sequence++;
         s_non_grayscale_total++;
         APP_LOGE(TAG,
@@ -533,23 +757,91 @@ static bool flow_animation_due(const time_snapshot_t *snapshot)
     return true;
 }
 
-static void flow_animation(void)
+static void render_flow_frame(uint8_t phase)
 {
     s_last_output_main = false;
-    for (uint8_t phase = 0; phase < FLOW_FRAME_COUNT; ++phase) {
-        ws2812_matrix_clear();
-        for (uint8_t y = 0; y < MATRIX_HEIGHT; ++y) {
-            for (uint8_t x = 0; x < MATRIX_WIDTH; ++x) {
-                uint8_t band = (uint8_t)((x + y + phase) & 0x0f);
-                if (band < 4) {
-                    uint8_t level = (uint8_t)(4 - band);
-                    uint8_t intensity = (uint8_t)((level * DISPLAY_WHITE) / 4u);
-                    ws2812_matrix_set_pixel(x, y, intensity, intensity, intensity);
-                }
+    ws2812_matrix_clear();
+    for (uint8_t y = 0; y < MATRIX_HEIGHT; ++y) {
+        for (uint8_t x = 0; x < MATRIX_WIDTH; ++x) {
+            const uint8_t band = (uint8_t)((x + y + phase) & 0x0f);
+            if (band < 4) {
+                const uint8_t level = (uint8_t)(4 - band);
+                const uint8_t intensity = (uint8_t)((level * DISPLAY_WHITE) / 4u);
+                ws2812_matrix_set_pixel(x, y, intensity, intensity, intensity);
             }
         }
-        (void)show_frame_with_retry();
-        vTaskDelay(pdMS_TO_TICKS(FLOW_FRAME_DELAY_MS));
+    }
+}
+
+static void flow_animation_begin(void)
+{
+    if (s_animation.active) return;
+    memset(&s_animation, 0, sizeof(s_animation));
+    s_animation.active = true;
+    s_animation.animation_id = ++s_next_animation_id;
+    s_animation.target_frame_count = FLOW_FRAME_COUNT;
+    s_animation.started_at = xTaskGetTickCount();
+    s_animation.next_frame_tick = s_animation.started_at;
+    display_record_event(RUNTIME_EVENT_DISPLAY_ANIMATION,
+                         0, (int32_t)s_animation.animation_id,
+                         DISPLAY_ANIMATION_BEGIN);
+}
+
+static void flow_animation_finish(bool aborted)
+{
+    if (!s_animation.active) return;
+    const TickType_t now = xTaskGetTickCount();
+    const uint32_t elapsed_ms = (uint32_t)((now - s_animation.started_at) *
+                                           portTICK_PERIOD_MS);
+    const uint32_t phase = aborted ? DISPLAY_ANIMATION_ABORT : DISPLAY_ANIMATION_COMPLETE;
+    const uint32_t summary_flags =
+        phase |
+        ((s_animation.successful_frames & 0xffU) << DISPLAY_ANIMATION_SUCCESS_SHIFT) |
+        ((s_animation.max_refresh_ms & 0xffU) << DISPLAY_ANIMATION_MAX_REFRESH_SHIFT);
+    display_record_event(RUNTIME_EVENT_DISPLAY_ANIMATION,
+                         (int32_t)s_animation.attempted_frames,
+                         (int32_t)elapsed_ms,
+                         summary_flags);
+    s_animation.active = false;
+    s_animation.abort_requested = false;
+    s_last_output_main = false;
+    /* Always leave the animation with a complete, normal frame. */
+    (void)render_normal(xTaskGetTickCount(), NULL);
+}
+
+static void flow_animation_step(void)
+{
+    if (!s_animation.active) return;
+    const TickType_t now = xTaskGetTickCount();
+    if (s_animation.abort_requested) {
+        flow_animation_finish(true);
+        return;
+    }
+    if ((int32_t)(now - s_animation.next_frame_tick) < 0) return;
+
+    render_flow_frame(s_animation.current_frame);
+    s_animation.attempted_frames++;
+    const esp_err_t err = show_frame_with_retry();
+    ws2812_refresh_diagnostics_t diag = {0};
+    ws2812_matrix_get_refresh_diagnostics(&diag);
+    if (diag.last_refresh_ms > s_animation.max_refresh_ms) {
+        s_animation.max_refresh_ms = diag.last_refresh_ms;
+    }
+    if (err != ESP_OK) {
+        s_animation.abort_requested = true;
+        display_record_event(RUNTIME_EVENT_DISPLAY_ERROR,
+                             (int32_t)s_animation.current_frame,
+                             err,
+                             err == ESP_ERR_TIMEOUT ? DISPLAY_REFRESH_TIMEOUT : 0);
+        flow_animation_finish(true);
+        return;
+    }
+
+    s_animation.successful_frames++;
+    if (++s_animation.current_frame >= s_animation.target_frame_count) {
+        flow_animation_finish(false);
+    } else {
+        s_animation.next_frame_tick = now + pdMS_TO_TICKS(FLOW_FRAME_DELAY_MS);
     }
 }
 
@@ -566,9 +858,20 @@ static void display_task(void *arg)
     network_notice_t pending_notice = NETWORK_NOTICE_NONE;
 
     for (;;) {
+        const TickType_t wait_ticks = s_animation.active
+                                          ? pdMS_TO_TICKS(FLOW_FRAME_DELAY_MS)
+                                          : pdMS_TO_TICKS(DISPLAY_REFRESH_PERIOD_MS);
         const EventBits_t events =
             xEventGroupWaitBits(s_events, DISPLAY_ALL_EVENTS, pdTRUE, pdFALSE,
-                                pdMS_TO_TICKS(DISPLAY_REFRESH_PERIOD_MS));
+                                wait_ticks);
+        display_heartbeat();
+        display_summary_if_due(xTaskGetTickCount());
+
+        portENTER_CRITICAL(&s_health_lock);
+        const bool recovery_requested = s_recovery_requested;
+        s_recovery_requested = false;
+        portEXIT_CRITICAL(&s_health_lock);
+        if (recovery_requested) s_animation.abort_requested = true;
 
         if (mode == DISPLAY_MODE_BOOT) {
             if ((events & DISPLAY_NETWORK_SUCCESS) != 0) {
@@ -606,7 +909,8 @@ static void display_task(void *arg)
             if (pending_notice == NETWORK_NOTICE_SUCCESS || s_network_connected) {
                 render_network_success();
                 vTaskDelay(pdMS_TO_TICKS(DISPLAY_NOTICE_DURATION_MS));
-            } else if (boot_timed_out_without_time_source) {
+            } else if (pending_notice == NETWORK_NOTICE_FAILURE ||
+                       boot_timed_out_without_time_source) {
                 render_network_failure();
                 vTaskDelay(pdMS_TO_TICKS(DISPLAY_NOTICE_DURATION_MS));
             }
@@ -616,10 +920,16 @@ static void display_task(void *arg)
             continue;
         }
 
+        if (s_animation.active) {
+            flow_animation_step();
+            continue;
+        }
+
         time_snapshot_t snapshot = {0};
         const bool time_ready = render_normal(boot_started, &snapshot);
         if (time_ready && flow_animation_due(&snapshot)) {
-            flow_animation();
+            flow_animation_begin();
+            flow_animation_step();
         }
     }
 }
@@ -646,6 +956,10 @@ esp_err_t app_display_init(bool network_expected)
                     &s_display_task_handle) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
+    portENTER_CRITICAL(&s_health_lock);
+    s_display_health.last_progress_tick = xTaskGetTickCount();
+    s_display_health.last_refresh_tick = s_display_health.last_progress_tick;
+    portEXIT_CRITICAL(&s_health_lock);
     xEventGroupSetBits(s_events, DISPLAY_REFRESH);
     return ESP_OK;
 }
@@ -653,6 +967,22 @@ esp_err_t app_display_init(bool network_expected)
 TaskHandle_t app_display_get_task_handle(void)
 {
     return s_display_task_handle;
+}
+
+void app_display_get_health(app_display_health_t *out)
+{
+    if (out == NULL) return;
+    portENTER_CRITICAL(&s_health_lock);
+    *out = s_display_health;
+    portEXIT_CRITICAL(&s_health_lock);
+}
+
+void app_display_request_recovery(void)
+{
+    portENTER_CRITICAL(&s_health_lock);
+    s_recovery_requested = true;
+    portEXIT_CRITICAL(&s_health_lock);
+    app_display_request_refresh();
 }
 
 /* 其他任务只发送刷新事件，不直接操作 WS2812。 */
@@ -671,8 +1001,58 @@ void app_display_set_brightness(uint8_t brightness_percent)
 
 void app_display_set_network_connected(bool connected)
 {
+    portENTER_CRITICAL(&s_status_lock);
     s_network_connected = connected;
     if (connected) s_network_seen = true;
+    portEXIT_CRITICAL(&s_status_lock);
+    app_display_request_refresh();
+}
+
+void app_display_set_wifi_fault(bool fault)
+{
+    portENTER_CRITICAL(&s_status_lock);
+    s_wifi_fault = fault;
+    portEXIT_CRITICAL(&s_status_lock);
+    app_display_request_refresh();
+}
+
+void app_display_set_weather_fault(bool fault)
+{
+    portENTER_CRITICAL(&s_status_lock);
+    s_weather_fault = fault;
+    portEXIT_CRITICAL(&s_status_lock);
+    app_display_request_refresh();
+}
+
+void app_display_set_bluetooth_connected(bool connected)
+{
+    portENTER_CRITICAL(&s_status_lock);
+    s_bluetooth_connected = connected;
+    portEXIT_CRITICAL(&s_status_lock);
+    app_display_request_refresh();
+}
+
+void app_display_set_weather_fetching(bool fetching)
+{
+    portENTER_CRITICAL(&s_status_lock);
+    s_weather_fetching = fetching;
+    portEXIT_CRITICAL(&s_status_lock);
+    app_display_request_refresh();
+}
+
+static void start_status_blink(status_blink_color_t color)
+{
+    portENTER_CRITICAL(&s_status_lock);
+    s_blink_color = (uint8_t)color;
+    s_blink_started = xTaskGetTickCount();
+    s_blink_active = true;
+    portEXIT_CRITICAL(&s_status_lock);
+    app_display_request_refresh();
+}
+
+void app_display_show_bluetooth_connected(void)
+{
+    start_status_blink(STATUS_COLOR_BLUE);
 }
 
 void app_display_show_network_success(void)
@@ -687,4 +1067,14 @@ void app_display_show_network_failure(void)
     if (!s_events) return;
     xEventGroupClearBits(s_events, DISPLAY_NETWORK_SUCCESS);
     xEventGroupSetBits(s_events, DISPLAY_NETWORK_FAILURE);
+}
+
+void app_display_show_weather_refresh_success(void)
+{
+    start_status_blink(STATUS_COLOR_CYAN);
+}
+
+void app_display_show_weather_refresh_failure(void)
+{
+    app_display_request_refresh();
 }

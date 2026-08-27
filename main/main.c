@@ -78,11 +78,13 @@ static void wifi_changed(void)
 
     app_display_set_network_connected(connected);
     if (connected && !s_last_sta_connected) {
+        app_display_set_wifi_fault(false);
         app_display_show_network_success();
         app_time_notify_network();
     } else if (!connected &&
                failure_count == 3U &&
                s_last_sta_failure_count != failure_count) {
+        app_display_set_wifi_fault(true);
         app_display_show_network_failure();
     }
 
@@ -180,6 +182,7 @@ void app_main(void)
         .sntp_task = app_time_get_sntp_task_handle(),
         .location_task = app_time_get_location_task_handle(),
         .weather_task = app_weather_get_task_handle(),
+        .wifi_event_work_task = wifi_manager_get_event_work_task_handle(),
         .radar_task =
  #if WITIME_RADAR_ENABLED
             radar_presence_get_task_handle(),

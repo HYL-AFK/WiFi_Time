@@ -10,7 +10,8 @@
 #include "nvs.h"
 #include "app_log.h"
 
-#define RUNTIME_EVENT_LOG_CAPACITY 16
+#define RUNTIME_EVENT_LOG_CAPACITY 32
+#define RUNTIME_EVENT_LOG_V1_CAPACITY 16
 #define RUNTIME_EVENT_RECORD_SIZE 32
 #define RUNTIME_EVENT_MAGIC 0x524Cu
 #define RUNTIME_EVENT_STORE_MAGIC 0x52544C47u
@@ -37,11 +38,18 @@ typedef struct __attribute__((packed)) {
     runtime_event_record_t records[RUNTIME_EVENT_LOG_CAPACITY];
 } runtime_event_store_t;
 
+typedef struct __attribute__((packed)) {
+    runtime_event_header_t header;
+    runtime_event_record_t records[RUNTIME_EVENT_LOG_V1_CAPACITY];
+} runtime_event_store_v1_t;
+
 _Static_assert(sizeof(runtime_event_header_t) == 32,
                "runtime event header layout changed");
 _Static_assert(sizeof(runtime_event_record_t) == RUNTIME_EVENT_RECORD_SIZE,
                "runtime event record layout changed");
-_Static_assert(sizeof(runtime_event_store_t) == 544,
+_Static_assert(sizeof(runtime_event_store_v1_t) == 544,
+               "runtime event legacy NVS blob layout changed");
+_Static_assert(sizeof(runtime_event_store_t) == 1056,
                "runtime event NVS blob size changed");
 
 static const char *TAG = "runtime_event_log";
@@ -102,6 +110,48 @@ static bool store_valid(const runtime_event_store_t *store)
     return true;
 }
 
+static void store_reset(runtime_event_store_t *store);
+
+static bool store_v1_valid(const runtime_event_store_v1_t *store)
+{
+    const runtime_event_header_t *header = &store->header;
+    if (header->magic != RUNTIME_EVENT_STORE_MAGIC ||
+        header->version != RUNTIME_EVENT_VERSION ||
+        header->record_size != RUNTIME_EVENT_RECORD_SIZE ||
+        header->capacity != RUNTIME_EVENT_LOG_V1_CAPACITY ||
+        header->write_index >= RUNTIME_EVENT_LOG_V1_CAPACITY ||
+        header->read_index >= RUNTIME_EVENT_LOG_V1_CAPACITY ||
+        header->count > RUNTIME_EVENT_LOG_V1_CAPACITY ||
+        header->header_crc32 != header_crc(header)) {
+        return false;
+    }
+
+    for (uint16_t i = 0; i < header->count; ++i) {
+        const uint16_t index = (uint16_t)((header->read_index + i) %
+                                          RUNTIME_EVENT_LOG_V1_CAPACITY);
+        if (!record_valid(&store->records[index])) return false;
+    }
+    return true;
+}
+
+static void migrate_v1_store(const runtime_event_store_v1_t *legacy,
+                             runtime_event_store_t *store)
+{
+    store_reset(store);
+    const uint16_t count = legacy->header.count;
+    for (uint16_t i = 0; i < count; ++i) {
+        const uint16_t source = (uint16_t)((legacy->header.read_index + i) %
+                                           RUNTIME_EVENT_LOG_V1_CAPACITY);
+        store->records[i] = legacy->records[source];
+    }
+    store->header.read_index = 0;
+    store->header.count = count;
+    store->header.write_index = (uint16_t)(count % RUNTIME_EVENT_LOG_CAPACITY);
+    store->header.next_sequence = legacy->header.next_sequence;
+    if (store->header.next_sequence == 0) store->header.next_sequence = 1;
+    store->header.header_crc32 = header_crc(&store->header);
+}
+
 static void store_reset(runtime_event_store_t *store)
 {
     memset(store, 0, sizeof(*store));
@@ -132,12 +182,28 @@ esp_err_t runtime_event_log_init(void)
     if (s_lock == NULL) return ESP_ERR_NO_MEM;
 
     bool valid = false;
+    bool migrated = false;
     nvs_handle_t handle;
     if (nvs_open(RUNTIME_EVENT_NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
-        size_t size = sizeof(s_store);
-        if (nvs_get_blob(handle, RUNTIME_EVENT_NVS_KEY, &s_store, &size) == ESP_OK &&
-            size == sizeof(s_store)) {
-            valid = store_valid(&s_store);
+        size_t size = 0;
+        if (nvs_get_blob(handle, RUNTIME_EVENT_NVS_KEY, NULL, &size) == ESP_OK) {
+            if (size == sizeof(s_store)) {
+                size_t current_size = sizeof(s_store);
+                if (nvs_get_blob(handle, RUNTIME_EVENT_NVS_KEY, &s_store,
+                                 &current_size) == ESP_OK) {
+                    valid = store_valid(&s_store);
+                }
+            } else if (size == sizeof(runtime_event_store_v1_t)) {
+                runtime_event_store_v1_t legacy = {0};
+                size_t legacy_size = sizeof(legacy);
+                if (nvs_get_blob(handle, RUNTIME_EVENT_NVS_KEY, &legacy,
+                                 &legacy_size) == ESP_OK &&
+                    store_v1_valid(&legacy)) {
+                    migrate_v1_store(&legacy, &s_store);
+                    valid = true;
+                    migrated = true;
+                }
+            }
         }
         nvs_close(handle);
     }
@@ -145,6 +211,15 @@ esp_err_t runtime_event_log_init(void)
     if (!valid) {
         store_reset(&s_store);
         APP_LOGW(TAG, "event queue invalid or empty; initialized new queue");
+    }
+    if (migrated) {
+        const esp_err_t migration_err = store_commit(&s_store);
+        if (migration_err != ESP_OK) {
+            APP_LOG_ERR(TAG, migration_err,
+                        "legacy 16-record event queue migration commit failed");
+        } else {
+            APP_LOGI(TAG, "migrated legacy 16-record event queue to 32 records");
+        }
     }
     s_initialized = true;
     APP_LOGI(TAG, "event queue ready: capacity=%u record_size=%u bytes=%u",
@@ -162,8 +237,9 @@ esp_err_t runtime_event_log_append(runtime_event_type_t type,
     if (!s_initialized || type == 0) return ESP_ERR_INVALID_STATE;
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    runtime_event_store_t previous = s_store;
+    const runtime_event_header_t previous_header = s_store.header;
     const uint16_t index = s_store.header.write_index;
+    const runtime_event_record_t previous_record = s_store.records[index];
     runtime_event_record_t *record = &s_store.records[index];
     memset(record, 0, sizeof(*record));
     record->magic = RUNTIME_EVENT_MAGIC;
@@ -192,7 +268,8 @@ esp_err_t runtime_event_log_append(runtime_event_type_t type,
 
     esp_err_t err = store_commit(&s_store);
     if (err != ESP_OK) {
-        s_store = previous;
+        s_store.header = previous_header;
+        s_store.records[index] = previous_record;
         APP_LOG_ERR(TAG, err, "append event failed: type=%u", (unsigned)type);
     }
     xSemaphoreGive(s_lock);

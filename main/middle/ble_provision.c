@@ -1,10 +1,12 @@
 #include "ble_provision.h"
 
 #include <inttypes.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "app_log.h"
+#include "app_display.h"
 #include "blufi_security.h"
 #include "esp_blufi.h"
 #include "esp_blufi_api.h"
@@ -15,6 +17,7 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
+#include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 #include "store/config/ble_store_config.h"
@@ -24,7 +27,7 @@ static const char *TAG = "ble_provision";
 
 void ble_store_config_init(void);
 
-#define BLE_FIXED_ADV_NAME "ESPARK-PowerGo"
+#define BLE_FIXED_ADV_NAME "ESPARK"
 #define BLUFI_SCAN_LIST_MAX_AP 20
 
 static app_config_t s_cfg;
@@ -44,6 +47,7 @@ static uint8_t s_last_sta_bssid[6];
 static bool s_last_sta_bssid_set;
 static uint8_t s_last_sta_reason = 0xff;
 static int8_t s_last_sta_rssi = -128;
+static uint8_t s_own_addr_type;
 static char s_adv_name[BLE_NAME_MAX_LEN + 1];
 static char s_pending_sta_ssid[WIFI_SSID_MAX_LEN + 1];
 static char s_pending_sta_pass[WIFI_PASS_MAX_LEN + 1];
@@ -89,9 +93,83 @@ static void blufi_host_task(void *param)
     nimble_port_freertos_deinit();
 }
 
-static void make_fixed_adv_name(void)
+static void make_adv_name(void)
 {
-    strlcpy(s_adv_name, BLE_FIXED_ADV_NAME, sizeof(s_adv_name));
+    uint8_t mac[6];
+
+    ESP_ERROR_CHECK(esp_read_mac(mac, ESP_MAC_BT));
+    snprintf(s_adv_name, sizeof(s_adv_name), "%s-%02X%02X%02X",
+             BLE_FIXED_ADV_NAME, mac[3], mac[4], mac[5]);
+}
+
+static void blufi_start_advertising(void);
+
+static int blufi_gap_event(struct ble_gap_event *event, void *arg)
+{
+    int rc = esp_blufi_handle_gap_events(event, arg);
+
+    if (event->type == BLE_GAP_EVENT_CONNECT && event->connect.status != 0) {
+        blufi_start_advertising();
+    } else if (event->type == BLE_GAP_EVENT_ADV_COMPLETE && !s_connected) {
+        blufi_start_advertising();
+    }
+
+    return rc;
+}
+
+static void blufi_start_advertising(void)
+{
+    struct ble_hs_adv_fields adv_fields;
+    struct ble_hs_adv_fields scan_rsp;
+    struct ble_gap_adv_params adv_params;
+    int rc = ble_hs_util_ensure_addr(0);
+
+    if (rc != 0) {
+        APP_LOGE(TAG, "BLE address setup failed: rc=%d", rc);
+        return;
+    }
+
+    rc = ble_hs_id_infer_auto(0, &s_own_addr_type);
+    if (rc != 0) {
+        APP_LOGE(TAG, "BLE address type inference failed: rc=%d", rc);
+        return;
+    }
+
+    memset(&scan_rsp, 0, sizeof(scan_rsp));
+    scan_rsp.name = (uint8_t *)s_adv_name;
+    scan_rsp.name_len = strlen(s_adv_name);
+    scan_rsp.name_is_complete = 1;
+    rc = ble_gap_adv_rsp_set_fields(&scan_rsp);
+    if (rc != 0) {
+        APP_LOGE(TAG, "BLE scan response setup failed: rc=%d", rc);
+        return;
+    }
+
+    memset(&adv_fields, 0, sizeof(adv_fields));
+    adv_fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    adv_fields.tx_pwr_lvl_is_present = 1;
+    adv_fields.tx_pwr_lvl = BLE_HS_ADV_TX_PWR_LVL_AUTO;
+    adv_fields.uuids16 = (ble_uuid16_t[]) { BLE_UUID16_INIT(BLUFI_APP_UUID) };
+    adv_fields.num_uuids16 = 1;
+    adv_fields.uuids16_is_complete = 1;
+    rc = ble_gap_adv_set_fields(&adv_fields);
+    if (rc != 0) {
+        APP_LOGE(TAG, "BLE advertisement setup failed: rc=%d", rc);
+        return;
+    }
+
+    memset(&adv_params, 0, sizeof(adv_params));
+    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
+    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER,
+                           &adv_params, blufi_gap_event, NULL);
+    if (rc != 0) {
+        APP_LOGE(TAG, "BLE advertisement start failed: rc=%d", rc);
+        return;
+    }
+
+    s_advertising = true;
+    APP_LOGI(TAG, "BluFi advertising, name=%s", s_adv_name);
 }
 
 static int softap_get_current_connection_number(void)
@@ -342,8 +420,7 @@ static void blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_
     case ESP_BLUFI_EVENT_INIT_FINISH:
         APP_LOGI(TAG, "BluFi init finish");
         s_ready = true;
-        s_advertising = true;
-        esp_blufi_adv_start();
+        blufi_start_advertising();
         break;
 
     case ESP_BLUFI_EVENT_DEINIT_FINISH:
@@ -357,6 +434,8 @@ static void blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_
         s_notify_enabled = true;
         s_advertising = false;
         s_conn_handle = param->connect.conn_id;
+        app_display_set_bluetooth_connected(true);
+        app_display_show_bluetooth_connected();
         APP_LOGI(TAG, "BluFi BLE connected, conn=%u", s_conn_handle);
         if (blufi_security_init() != ESP_OK) {
             APP_LOGE(TAG, "BluFi security init failed");
@@ -368,11 +447,11 @@ static void blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_
         APP_LOGI(TAG, "BluFi BLE disconnected");
         s_connected = false;
         s_notify_enabled = false;
-        s_advertising = true;
         s_conn_handle = 0xFFFF;
+        app_display_set_bluetooth_connected(false);
         s_wifi_list_requested = false;
         blufi_security_deinit();
-        esp_blufi_adv_start();
+        blufi_start_advertising();
         break;
 
     case ESP_BLUFI_EVENT_SET_WIFI_OPMODE:
@@ -517,7 +596,7 @@ static void blufi_on_reset(int reason)
 
 static void blufi_on_sync(void)
 {
-    make_fixed_adv_name();
+    make_adv_name();
     ble_svc_gap_device_name_set(s_adv_name);
     esp_blufi_profile_init();
 }
@@ -610,7 +689,7 @@ void ble_provision_init(const app_config_t *cfg, ble_cfg_apply_cb_t apply_cb)
     s_apply_cb = apply_cb;
     (void)s_apply_cb;
 
-    make_fixed_adv_name();
+    make_adv_name();
     s_conn_handle = 0xFFFF;
     s_last_sta_reason = 0xff;
     s_last_sta_rssi = -128;

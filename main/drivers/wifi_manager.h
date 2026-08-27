@@ -16,6 +16,8 @@
 #include "esp_netif_ip_addr.h"
 #include "esp_err.h"
 #include "esp_wifi_types.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "app_config.h"
 
 /* Wi-Fi 状态变化回调。BLE 广播状态位刷新就是通过这个回调触发的。 */
@@ -50,6 +52,7 @@ void wifi_manager_set_ap_password(const char *ap_pass);
 bool wifi_manager_is_sta_connected(void);
 bool wifi_manager_is_ap_started(void);
 uint32_t wifi_manager_get_sta_failure_count(void);
+TaskHandle_t wifi_manager_get_event_work_task_handle(void);
 
 /* 获取当前已连接 STA 的运行时信息。 */
 int wifi_manager_get_sta_rssi(void);

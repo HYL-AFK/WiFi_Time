@@ -27,6 +27,8 @@
 #define LOCATION_BODY_MAX 2048
 #define LOCATION_CHANGE_THRESHOLD_DEGREES 0.05
 #define SNTP_SERVER_TIMEOUT_MS 3000
+#define TIME_RESYNC_PERIOD_MS (4 * 60 * 60 * 1000)
+#define SNTP_SYNC_ATTEMPT_TIMEOUT_MS 10000
 
 static EventGroupHandle_t s_sntp_events;
 static EventGroupHandle_t s_location_events;
@@ -36,8 +38,10 @@ static bool s_location_body_overflow;
 static bool s_sntp_initialized;
 static bool s_sntp_sync_applied;
 static bool s_sntp_fallback_logged;
+static bool s_sntp_cycle_active;
 static bool s_timezone_prepared;
 static int64_t s_sntp_started_us;
+static int64_t s_next_sntp_due_us;
 static TaskHandle_t s_sntp_task_handle;
 static TaskHandle_t s_location_task_handle;
 static const char *TAG = "app_time";
@@ -231,6 +235,40 @@ static void apply_sntp_time(void)
                              (int32_t)elapsed_ms,
                              (int32_t)now,
                              0);
+    s_sntp_cycle_active = false;
+    s_next_sntp_due_us = esp_timer_get_time() +
+                         (int64_t)TIME_RESYNC_PERIOD_MS * 1000;
+}
+
+static esp_err_t begin_sntp_cycle(void)
+{
+    if (s_sntp_initialized) {
+        esp_netif_sntp_deinit();
+        s_sntp_initialized = false;
+    }
+
+    const char *primary_server = "time.cloudflare.com";
+    const char *fallback_server = "time.google.com";
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(
+        2, ESP_SNTP_SERVER_LIST(primary_server, fallback_server));
+    esp_err_t err = esp_netif_sntp_init(&cfg);
+    if (err != ESP_OK) {
+        APP_LOG_ERR(TAG, err, "SNTP init failed; keep previous time");
+        s_sntp_cycle_active = false;
+        s_next_sntp_due_us = esp_timer_get_time() +
+                             (int64_t)TIME_RESYNC_PERIOD_MS * 1000;
+        return err;
+    }
+
+    s_sntp_initialized = true;
+    s_sntp_cycle_active = true;
+    s_sntp_sync_applied = false;
+    s_sntp_fallback_logged = false;
+    s_sntp_started_us = esp_timer_get_time();
+    APP_LOGI(TAG,
+             "SNTP request started: region=global primary=%s fallback=%s timeout=%d ms",
+             primary_server, fallback_server, SNTP_SERVER_TIMEOUT_MS);
+    return ESP_OK;
 }
 
 static void sntp_task(void *arg)
@@ -241,38 +279,33 @@ static void sntp_task(void *arg)
             s_sntp_events, TIME_NET_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(1000));
 
         if ((bits & TIME_NET_EVENT) != 0) {
-            s_sntp_sync_applied = false;
-            s_sntp_fallback_logged = false;
-            s_sntp_started_us = esp_timer_get_time();
             /* SNTP 不依赖定位；拿到 IP 后立即启动，定位由独立任务并行处理。 */
-            if (!s_sntp_initialized) {
-                const char *primary_server = "time.cloudflare.com";
-                const char *fallback_server = "time.google.com";
-                esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(
-                    2, ESP_SNTP_SERVER_LIST(primary_server, fallback_server));
-                esp_err_t err = esp_netif_sntp_init(&cfg);
-                if (err == ESP_OK) {
-                    s_sntp_initialized = true;
-                    APP_LOGI(TAG,
-                             "SNTP request started: region=global primary=%s fallback=%s timeout=%d ms",
-                             primary_server, fallback_server, SNTP_SERVER_TIMEOUT_MS);
-                } else {
-                    APP_LOG_ERR(TAG, err, "SNTP init failed");
-                }
-            }
+            (void)begin_sntp_cycle();
         }
 
-        if (s_sntp_initialized && !s_sntp_sync_applied &&
+        const int64_t now_us = esp_timer_get_time();
+        if (!s_sntp_cycle_active && s_next_sntp_due_us > 0 &&
+            now_us >= s_next_sntp_due_us) {
+            (void)begin_sntp_cycle();
+        }
+
+        if (s_sntp_cycle_active &&
             !s_sntp_fallback_logged && s_sntp_started_us > 0 &&
-            esp_timer_get_time() - s_sntp_started_us >=
+            now_us - s_sntp_started_us >=
                 (int64_t)SNTP_SERVER_TIMEOUT_MS * 1000) {
             s_sntp_fallback_logged = true;
             APP_LOGW(TAG, "SNTP primary timeout window elapsed; waiting for fallback server");
         }
 
-        if (s_sntp_initialized && !s_sntp_sync_applied &&
+        if (s_sntp_cycle_active &&
             esp_netif_sntp_sync_wait(pdMS_TO_TICKS(100)) == ESP_OK) {
             apply_sntp_time();
+        } else if (s_sntp_cycle_active && s_sntp_started_us > 0 &&
+                   now_us - s_sntp_started_us >=
+                       (int64_t)SNTP_SYNC_ATTEMPT_TIMEOUT_MS * 1000) {
+            APP_LOGW(TAG, "SNTP sync failed; keep previous time and retry in 4 hours");
+            s_sntp_cycle_active = false;
+            s_next_sntp_due_us = now_us + (int64_t)TIME_RESYNC_PERIOD_MS * 1000;
         }
     }
 }

@@ -14,7 +14,8 @@ void weather_snapshot_set(const weather_snapshot_t *value) { if(!value||!s_lock)
 void weather_snapshot_set_rtc_temperature_q4(int16_t quarter_degrees) {
     if (!s_lock) return;
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (s_value.temperature_source != WEATHER_TEMP_SOURCE_NETWORK) {
+    if (s_value.temperature_source != WEATHER_TEMP_SOURCE_NETWORK &&
+        !s_value.network_error) {
         s_value.temperature_c = (float)quarter_degrees * 0.25f;
         s_value.temperature_valid = true;
         s_value.temperature_source = WEATHER_TEMP_SOURCE_RTC;

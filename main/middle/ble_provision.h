@@ -3,7 +3,8 @@
 /*
  * BLE provisioning interface based on standard BluFi.
  *
- * The BLE advertising/scan name is fixed to "ESPARK-PowerGo".
+ * The BLE advertising/scan name is "ESPARK-XXXXXX", where XXXXXX
+ * is the last six hexadecimal digits of the Bluetooth MAC address.
  * Wi-Fi credentials are provisioned through the standard BluFi profile,
  * not the old custom FFF0/FFF1/FFF2 command protocol.
  */
@@ -29,5 +30,5 @@ bool ble_provision_is_notify_enabled(void);
 /* Current BluFi connection handle; usually 0xFFFF when not connected. */
 uint16_t ble_provision_get_conn_handle(void);
 
-/* Current advertising name, fixed to "ESPARK-PowerGo". */
+/* Current advertising name, derived from the Bluetooth MAC address. */
 const char *ble_provision_get_adv_name(void);

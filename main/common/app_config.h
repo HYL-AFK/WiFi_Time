@@ -32,7 +32,7 @@ typedef struct {
     char last_wifi_ssid[WIFI_SSID_MAX_LEN + 1];
     bool has_last_wifi_ssid;
 
-    /* User display name. BLE advertising name stays fixed as ESPARK-PowerGo. */
+    /* User display name. BLE advertising name stays fixed as ESPARK-XXXXXX. */
     char ble_name[BLE_NAME_MAX_LEN + 1];
 
     /* SoftAP name and password. Passwords shorter than 8 are treated as open AP by ESP-IDF. */

@@ -15,6 +15,7 @@ typedef struct {
     int weather_code;
     bool valid;
     bool temperature_valid;
+    bool network_error;
     weather_temperature_source_t temperature_source;
     time_t updated_at;
 } weather_snapshot_t;

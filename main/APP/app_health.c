@@ -1,6 +1,7 @@
 #include "app_health.h"
 
 #include <inttypes.h>
+#include <stdbool.h>
 
 #include "driver/temperature_sensor.h"
 #include "esp_heap_caps.h"
@@ -8,13 +9,18 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "common/app_log.h"
+#include "common/runtime_event_log.h"
+#include "app_display.h"
 
 #define HEALTH_SAMPLE_PERIOD_MS 1000
 #define HEALTH_STACK_WARN_WORDS 256
+#define DISPLAY_STALL_TIMEOUT_MS 2000 /* 2 seconds */
 
 static const char *TAG = "app_health";
 static app_health_task_refs_t s_refs;
 static temperature_sensor_handle_t s_temperature_sensor;
+static uint32_t s_last_display_heartbeat;
+static bool s_display_stall_reported;
 
 static void report_task(const char *name, TaskHandle_t task)
 {
@@ -56,7 +62,34 @@ static void health_task(void *arg)
         report_task("sntp_task", s_refs.sntp_task);
         report_task("location_task", s_refs.location_task);
         report_task("weather_task", s_refs.weather_task);
+        report_task("wifi_event_work", s_refs.wifi_event_work_task);
         report_task("radar_presence", s_refs.radar_task);
+
+        app_display_health_t display_health = {0};
+        app_display_get_health(&display_health);
+        const TickType_t now = xTaskGetTickCount();
+        if (display_health.heartbeat != s_last_display_heartbeat) {
+            s_last_display_heartbeat = display_health.heartbeat;
+            s_display_stall_reported = false;
+        } else if (!s_display_stall_reported &&
+                   display_health.last_progress_tick != 0 &&
+                   (TickType_t)(now - display_health.last_progress_tick) >
+                       pdMS_TO_TICKS(DISPLAY_STALL_TIMEOUT_MS)) {
+            s_display_stall_reported = true;
+            runtime_event_log_append(RUNTIME_EVENT_DISPLAY_ERROR,
+                                     (int32_t)display_health.animation_frame,
+                                     (int32_t)display_health.last_refresh_ms,
+                                     DISPLAY_HEALTH_STALLED |
+                                         ((display_health.animation_id & 0xffU)
+                                          << DISPLAY_DIAGNOSTIC_ANIMATION_ID_SHIFT));
+            APP_LOGW(TAG,
+                     "display heartbeat stalled for 2 seconds: animation=%" PRIu32
+                     " frame=%u last_refresh_ms=%" PRIu32,
+                     display_health.animation_id,
+                     display_health.animation_frame,
+                     display_health.last_refresh_ms);
+            app_display_request_recovery();
+        }
         vTaskDelay(pdMS_TO_TICKS(HEALTH_SAMPLE_PERIOD_MS));
     }
 }

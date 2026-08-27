@@ -13,7 +13,22 @@ typedef enum {
     RUNTIME_EVENT_RADAR_STATE,
     RUNTIME_EVENT_BRIGHTNESS_CHANGE,
     RUNTIME_EVENT_DISPLAY_ERROR,
+    RUNTIME_EVENT_DISPLAY_ANIMATION,
 } runtime_event_type_t;
+
+/* Display diagnostics use value1/value2 for frame/count and duration/error. */
+#define DISPLAY_ANIMATION_BEGIN 1u
+#define DISPLAY_ANIMATION_COMPLETE 2u
+#define DISPLAY_ANIMATION_ABORT 3u
+#define DISPLAY_REFRESH_TIMEOUT (1u << 8)
+#define DISPLAY_REFRESH_RETRY (1u << 9)
+#define DISPLAY_RMT_RECOVERY_SUCCESS (1u << 10)
+#define DISPLAY_RMT_RECOVERY_FAILURE (1u << 11)
+#define DISPLAY_HEALTH_STALLED (1u << 12)
+#define DISPLAY_SUMMARY (1u << 13)
+#define DISPLAY_ANIMATION_SUCCESS_SHIFT 16
+#define DISPLAY_ANIMATION_MAX_REFRESH_SHIFT 24
+#define DISPLAY_DIAGNOSTIC_ANIMATION_ID_SHIFT 16
 
 typedef struct __attribute__((packed)) {
     uint16_t magic;

@@ -11,6 +11,7 @@ typedef struct {
     TaskHandle_t location_task;
     TaskHandle_t weather_task;
     TaskHandle_t radar_task;
+    TaskHandle_t wifi_event_work_task;
 } app_health_task_refs_t;
 
 esp_err_t app_health_init(const app_health_task_refs_t *refs);

@@ -84,14 +84,20 @@ $configHeader = Get-Content -Raw main/common/app_config.h
 $appLogHeader = Get-Content -Raw main/common/app_log.h
 $runtimeLogSource = Get-Content -Raw main/common/runtime_event_log.c
 $runtimeLogHeader = Get-Content -Raw main/common/runtime_event_log.h
+$healthSource = Get-Content -Raw main/APP/app_health.c
 
 Assert-True (-not $rtcSource.Contains('value.valid')) "RTC task must not validate RTC time"
 Assert-True (-not $displaySource.Contains('t.valid')) "display task must not gate RTC display on valid"
 Assert-True (-not $timeSource.Contains('.valid=true')) "SNTP snapshot must not use removed time valid flag"
 Assert-True (-not $timeSnapshotHeader.Contains('bool valid')) "time snapshot must not expose RTC validity"
 Assert-True ($timeSnapshotHeader.Contains('bool time_snapshot_is_ready(void)')) "time snapshot readiness API is missing"
-Assert-True ($runtimeLogSource.Contains('#define RUNTIME_EVENT_LOG_CAPACITY 16') -and
-             $runtimeLogSource.Contains('#define RUNTIME_EVENT_RECORD_SIZE 32')) "runtime event log size is not fixed at 16x32 bytes"
+Assert-True ($runtimeLogSource.Contains('#define RUNTIME_EVENT_LOG_CAPACITY 32') -and
+             $runtimeLogSource.Contains('#define RUNTIME_EVENT_RECORD_SIZE 32')) "runtime event log size is not fixed at 32x32 bytes"
+Assert-True ($runtimeLogSource.Contains('sizeof(runtime_event_store_v1_t)') -and
+             $runtimeLogSource.Contains('RUNTIME_EVENT_LOG_V1_CAPACITY 16') -and
+             $runtimeLogSource.Contains('migration')) "runtime event log must migrate the legacy 16-record blob"
+Assert-True ($runtimeLogSource.Contains('sizeof(runtime_event_store_t) == 1056') -or
+             $runtimeLogSource.Contains('sizeof(runtime_event_store_t) == 32 + 32 * 32')) "runtime event log must reserve the 32-record blob"
 Assert-True ($runtimeLogSource.Contains('write_index') -and
              $runtimeLogSource.Contains('read_index') -and
              $runtimeLogSource.Contains('count')) "runtime event log ring pointers are missing"
@@ -100,6 +106,11 @@ Assert-True ($runtimeLogSource.Contains('timestamp') -and
              $runtimeLogSource.Contains('record_crc32')) "runtime event log must persist timestamped CRC records"
 Assert-True ($runtimeLogHeader.Contains('runtime_event_log_append') -and
              $runtimeLogHeader.Contains('runtime_event_log_get')) "runtime event log API is missing"
+$appendFunction = [regex]::Match($runtimeLogSource, '(?s)esp_err_t runtime_event_log_append\(.*?\n\}')
+Assert-True ($appendFunction.Success -and
+             -not $appendFunction.Value.Contains('runtime_event_store_t previous = s_store')) "runtime event append must not copy the full store on the task stack"
+Assert-True ($runtimeLogHeader.Contains('RUNTIME_EVENT_DISPLAY_ANIMATION') -and
+             $runtimeLogHeader.Contains('RUNTIME_EVENT_DISPLAY_ERROR')) "display runtime event types are missing"
 Assert-True ((Get-Content -Raw main/CMakeLists.txt).Contains('common/runtime_event_log.c')) "runtime event log must be part of the component"
 Assert-True ($mainSource.Contains('runtime_event_log_init') -and
              $mainSource.Contains('RUNTIME_EVENT_BOOT')) "boot event must be stored"
@@ -131,6 +142,16 @@ Assert-True ($timeSource.Contains('cJSON_GetObjectItem') -and $timeSource.Contai
 Assert-True ($timeSource.Contains('timezone') -and $timeSource.Contains('id')) "time task must parse nested and flat timezone responses"
 Assert-True ($timeSource.Contains('HTTP %d')) "location HTTP status failures must be logged"
 Assert-True ($weatherSource.Contains('location_snapshot_get')) "weather task must use the dynamic location snapshot"
+Assert-True ($weatherSource.Contains('#define WEATHER_FIRST_WINDOW_START_MS (20 * 60 * 1000)') -and
+             $weatherSource.Contains('#define WEATHER_FETCH_WINDOW_MS (10 * 60 * 1000)') -and
+             $weatherSource.Contains('#define WEATHER_REFRESH_PERIOD_MS (30 * 60 * 1000)')) "weather schedule must use 20-minute start, 10-minute fetch windows, and 30-minute refreshes"
+Assert-True ($weatherSource.Contains('s_pending_snapshot') -and
+             $weatherSource.Contains('s_pending_snapshot_valid') -and
+             $weatherSource.Contains('publish_pending_weather')) "weather task must keep pending data separate from the displayed snapshot"
+Assert-True ($weatherSource.Contains('s_window_success') -and
+             $weatherSource.Contains('WEATHER_NET_EVENT')) "weather task must retry an active window when network becomes available"
+Assert-True ($weatherSource.Contains('app_display_set_weather_fetching') -and
+             $weatherSource.Contains('app_display_show_weather_refresh_success')) "weather task must drive fetching and refresh-success status events"
 Assert-True (-not $weatherSource.Contains('latitude=31.23&longitude=121.47')) "weather URL must not hard-code Shanghai coordinates"
 Assert-True ($weatherSource.Contains('snprintf') -and $weatherSource.Contains('%.6f')) "weather URL must be built from the location snapshot"
 Assert-True ($weatherSource.Contains('current=temperature_2m,weather_code')) "weather request must only fetch temperature and condition"
@@ -227,6 +248,11 @@ Assert-True ($ds3231Source.Contains('DS3231_TEMP_REG 0x11')) "missing DS3231 tem
 Assert-True ($ds3231Source.Contains('temperature_regs[1] >> 6')) "missing DS3231 temperature fractional decode"
 Assert-True ($weatherSnapshotHeader.Contains('temperature_valid')) "weather snapshot must separate temperature validity"
 Assert-True ($weatherSnapshotHeader.Contains('temperature_source')) "weather snapshot must track temperature source"
+Assert-True ($weatherSnapshotHeader.Contains('network_error')) "weather snapshot must distinguish a failed scheduled refresh from RTC fallback"
+Assert-True ($weatherSnapshotSource.Contains('network_error') -and
+             $weatherSnapshotSource.Contains('!s_value.network_error')) "RTC temperature fallback must stop after a published weather failure"
+Assert-True ($displaySource.Contains('weather->network_error') -and
+             $displaySource.Contains('DISPLAY_RED_R')) "weather failure must render a red temperature cross"
 Assert-True ($weatherSnapshotSource.Contains('weather_snapshot_set_rtc_temperature_q4')) "missing RTC temperature snapshot setter"
 Assert-True ($rtcSource.Contains('s_rtc_temperature_loaded')) "RTC task must retry temperature until first success"
 Assert-True ($rtcSource.Contains('ds3231_read_temperature_q4')) "RTC task must read DS3231 temperature"
@@ -306,11 +332,36 @@ Assert-True ($displaySource.Contains('STARTUP_RING_LAP_DURATION_MS 6000')) "one 
 Assert-True (-not $displaySource.Contains('render_startup_frame(startup_frame++)')) "startup ring must not restart from a counter increment at cycle boundaries"
 Assert-True ($displaySource.Contains('#define STARTUP_RING_TRAIL_LENGTH 5') -and
              $displaySource.Contains('s_startup_trail_levels')) "startup ring chase must use a five-pixel fading trail"
+$ringMatch = [regex]::Match($displaySource, '(?s)s_startup_clock_ring\[\]\s*=\s*\{(.*?)\};')
+Assert-True $ringMatch.Success "startup pixel ring coordinate table is missing"
+$ringPoints = [regex]::Matches($ringMatch.Groups[1].Value, '\{\s*(\d+)\s*,\s*(\d+)\s*\}')
+Assert-True ($ringPoints.Count -eq 32) "startup pixel ring must contain 32 points"
+$ringSet = @{}
+foreach ($point in $ringPoints) {
+    $x = [int]$point.Groups[1].Value
+    $y = [int]$point.Groups[2].Value
+    Assert-True ($x -ge 0 -and $x -lt 16 -and $y -ge 0 -and $y -lt 16) "startup ring point must fit within 16x16 matrix"
+    $ringSet["$x,$y"] = $true
+}
+for ($index = 0; $index -lt $ringPoints.Count; $index++) {
+    $current = $ringPoints[$index]
+    $next = $ringPoints[($index + 1) % $ringPoints.Count]
+    $dx = [Math]::Abs(([int]$current.Groups[1].Value) - ([int]$next.Groups[1].Value))
+    $dy = [Math]::Abs(([int]$current.Groups[2].Value) - ([int]$next.Groups[2].Value))
+    Assert-True ($dx -le 1 -and $dy -le 1 -and ($dx + $dy) -gt 0) "startup ring points must be continuous 8-neighbors"
+}
+foreach ($key in $ringSet.Keys) {
+    $parts = $key -split ','
+    $x = [int]$parts[0]
+    $y = [int]$parts[1]
+    Assert-True $ringSet.ContainsKey("$([int](15 - $x)),$y") "startup ring must be horizontally symmetric"
+    Assert-True $ringSet.ContainsKey("$x,$([int](15 - $y))") "startup ring must be vertically symmetric"
+}
 Assert-True (-not $displaySource.Contains('STARTUP_HAND_FRAME') -and
              -not $displaySource.Contains('s_startup_hand')) "startup animation must not retain the clock hand"
 Assert-True (-not $displaySource.Contains('set_rect(7, 7, 2, 2')) "startup animation must not retain the center block"
 Assert-True ($displaySource.Contains('render_startup_frame_scaled') -and
-             -not $displaySource.Contains('DISPLAY_CYAN_R')) "startup animation must use grayscale brightness levels"
+             -not ($displaySource -match '(?s)static void render_startup_frame_scaled.*?DISPLAY_CYAN_R')) "startup animation must use grayscale brightness levels"
 Assert-True ($displaySource.Contains('#define STARTUP_FADE_STEP_MS 100') -and
              $displaySource.Contains('render_startup_fade_out(startup_frame)')) "startup page must use a two-step 200ms fade before transitions"
 Assert-True ($displaySource.Contains('#define STARTUP_RING_LAP_DURATION_MS 6000')) "startup ring lap must be 6 seconds"
@@ -328,6 +379,7 @@ Assert-True ($displaySource.Contains('boot_timed_out_without_time_source')) "dis
 Assert-True ($displaySource -match '(?s)boot_timed_out_without_time_source.*?mode = DISPLAY_MODE_MAIN;') "boot timeout without RTC or Wi-Fi must enter the main display"
 Assert-True ($displaySource -match '(?s)NETWORK_NOTICE_SUCCESS.*?mode = DISPLAY_MODE_MAIN;') "Wi-Fi success must enter the main display without waiting for SNTP"
 Assert-True ($displaySource.Contains('if (pending_notice == NETWORK_NOTICE_SUCCESS || s_network_connected)')) "boot must retain the Wi-Fi success page after a short-lived connection"
+Assert-True ($displaySource -match '(?s)pending_notice == NETWORK_NOTICE_FAILURE\s*\|\|\s*boot_timed_out_without_time_source') "boot must show the Wi-Fi failure page even when RTC time is already ready"
 Assert-True (([regex]::Matches($displaySource, 'mode\s*=\s*DISPLAY_MODE_BOOT')).Count -eq 1) "Wi-Fi loss after main-page entry must not re-enter boot mode"
 Assert-True ($displaySource.Contains('if (time_ready && flow_animation_due(&snapshot))')) "flow animation must not run from the 00:00 fallback clock"
 Assert-True ($displayHeader.Contains('app_display_set_network_connected(bool connected)') -and
@@ -348,8 +400,49 @@ Assert-True ($displaySource.Contains('#define DISPLAY_REFRESH_PERIOD_MS 50')) "d
 Assert-True ($displaySource.Contains('pdMS_TO_TICKS(DISPLAY_REFRESH_PERIOD_MS)')) "display task must use the configured refresh period"
 Assert-True (-not $displaySource.Contains('weather->humidity')) "display must not render humidity"
 Assert-True ($displaySource.Contains('#define SECONDS_X 15')) "missing rightmost seconds column"
-Assert-True ($displaySource.Contains('(seconds % SECONDS_H) + 1u')) "seconds bar must use a 15-second accumulation cycle"
+Assert-True ($displaySource.Contains('seconds / SECONDS_H') -and
+             $displaySource.Contains('(cycle & 1u) == 0u')) "seconds bar must alternate odd and even 15-second cycles"
 Assert-True ($displaySource.Contains('SECONDS_Y + SECONDS_H - 1u - row')) "seconds bar must grow from bottom to top"
+Assert-True ($displaySource.Contains('SECONDS_H - step - 1u')) "even seconds cycles must clear from bottom to top"
+Assert-True ($displaySource.Contains('SECONDS_Y + row')) "even seconds cycles must retain the top segment while clearing from the bottom"
+Assert-True ($displaySource.Contains('DISPLAY_STATUS_LAMP_X 15') -and
+             $displaySource.Contains('DISPLAY_STATUS_LAMP_Y 15')) "bottom-right status lamp coordinate is missing"
+Assert-True ($displaySource.Contains('DISPLAY_BLUE_R') -and
+             $displaySource.Contains('DISPLAY_CYAN_R') -and
+             $displaySource.Contains('DISPLAY_PINK_R') -and
+             $displaySource.Contains('DISPLAY_STATUS_BLINK_COUNT 2')) "status lamp colors and two-blink count are missing"
+Assert-True ($displaySource.Contains('s_blink_active') -and
+             $displaySource.Contains('draw_status_lamp')) "status lamp animation state is missing"
+Assert-True (-not $displaySource.Contains('static bool s_fault;')) "status lamp must not collapse independent faults into one flag"
+Assert-True ($displayHeader.Contains('app_display_set_wifi_fault(bool fault)') -and
+             $displayHeader.Contains('app_display_set_weather_fault(bool fault)')) "display must expose independent Wi-Fi and weather fault setters"
+Assert-True ($displaySource.Contains('wifi_fault || weather_fault')) "status lamp must show red while either independent fault remains active"
+$statusLamp = [regex]::Match($displaySource, '(?s)static void draw_status_lamp\(void\).*?\n\}')
+Assert-True ($statusLamp.Success -and
+             $statusLamp.Value.IndexOf('if (wifi_fault || weather_fault)') -lt
+             $statusLamp.Value.IndexOf('else if (bluetooth_connected)') -and
+             $statusLamp.Value.IndexOf('else if (bluetooth_connected)') -lt
+             $statusLamp.Value.IndexOf('else if (weather_fetching)')) "fault, Bluetooth, and weather-fetch priorities must remain ordered"
+Assert-True ($statusLamp.Value.Contains('bool render_blink = false;') -and
+             $statusLamp.Value.Contains('s_blink_active = false;') -and
+             $statusLamp.Value.Contains('else if (render_blink)')) "status blink must return to the real base state when it ends"
+Assert-True ($displaySource.Contains('portMUX_TYPE s_status_lock') -and
+             $displaySource.Contains('portENTER_CRITICAL(&s_status_lock)')) "concurrent status updates must use a display-state lock"
+$networkSuccess = [regex]::Match($displaySource, '(?s)void app_display_show_network_success\(void\).*?\n\}')
+$weatherSuccess = [regex]::Match($displaySource, '(?s)void app_display_show_weather_refresh_success\(void\).*?\n\}')
+Assert-True ($networkSuccess.Success -and
+             -not $networkSuccess.Value.Contains('app_display_set_weather_fault') -and
+             -not $networkSuccess.Value.Contains('s_weather_fault')) "Wi-Fi success page must not clear weather fault"
+Assert-True ($weatherSuccess.Success -and
+             -not $weatherSuccess.Value.Contains('app_display_set_wifi_fault') -and
+             -not $weatherSuccess.Value.Contains('s_wifi_fault')) "weather success blink must not clear Wi-Fi fault"
+Assert-True (-not ($displaySource -match '(?s)else if \(s_network_connected\).*?DISPLAY_GREEN_R')) "normal display must not remain green merely because STA is online"
+Assert-True ($displaySource.Contains('#define DISPLAY_NORMAL_R DISPLAY_GREEN_R') -and
+             $displaySource.Contains('red = DISPLAY_NORMAL_R') -and
+             $displaySource.Contains('level = status_breath_level(now);')) "normal status must use a breathing green lamp"
+Assert-True ($displayHeader.Contains('app_display_set_bluetooth_connected') -and
+             $displayHeader.Contains('app_display_set_weather_fetching') -and
+             $displayHeader.Contains('app_display_show_weather_refresh_success')) "status lamp display APIs are missing"
 Assert-True ($displaySource.Contains('ws2812_matrix_clear();') -and $displaySource.Contains('show_frame_with_retry')) "display initialization must send an all-black frame"
 Assert-True ($displaySource.Contains('show_frame_with_retry')) "display refresh must use the checked retry helper"
 Assert-True ($displaySource.Contains('APP_LOG_ERR')) "display refresh failures must be logged"
@@ -365,7 +458,15 @@ Assert-True ($displaySource.Contains('refresh recovered after %') -or
              $displaySource.Contains('refresh recovered after')) "WS2812 consecutive recovery log is missing"
 Assert-True ($displaySource.Contains('tm_min') -and $displaySource.Contains('30')) "missing half-hour animation trigger"
 Assert-True ($displaySource.Contains('FLOW_FRAME') -or $displaySource.Contains('flow_animation')) "missing full-screen flow animation"
-Assert-True ($weatherSource.Contains('pdMS_TO_TICKS(600000)')) "weather task must refresh every 10 minutes"
+Assert-True ($timeSource.Contains('#define TIME_RESYNC_PERIOD_MS (4 * 60 * 60 * 1000)') -and
+             $timeSource.Contains('s_next_sntp_due_us')) "SNTP must schedule a four-hour calibration period"
+Assert-True ($sdkconfig.Contains('CONFIG_LWIP_SNTP_UPDATE_DELAY=14400000') -and
+             $sdkconfigDefaults.Contains('CONFIG_LWIP_SNTP_UPDATE_DELAY=14400000')) "lwIP automatic SNTP updates must also use a four-hour period"
+Assert-True ($timeSource.Contains('esp_netif_sntp_deinit') -and
+             $timeSource.Contains('begin_sntp_cycle')) "SNTP must restart a fresh client for each four-hour cycle"
+Assert-True ($timeSource.Contains('keep previous time')) "SNTP failure must keep the previous time snapshot"
+Assert-True (-not $timeSource.Contains('app_display_set_wifi_fault') -and
+             -not $timeSource.Contains('app_display_set_weather_fault')) "SNTP outcomes must not change Wi-Fi or weather fault state"
 
 $drawio = New-Object System.Xml.XmlDocument
 $drawio.Load('D:\Project\WiTime_Hardware\witime_design.drawio')
@@ -385,10 +486,11 @@ Assert-True ($drawio.OuterXml.Contains('GPIO8')) "missing GPIO8 mapping"
 Assert-True ($drawio.OuterXml.Contains('GPIO10')) "missing GPIO10 mapping"
 Assert-True ((Get-Content -Raw main/drivers/ws2812_matrix.c).Contains('serpentine')) "missing serpentine implementation"
 Assert-True ($ws2812Source.Contains('.serpentine = false') -and $ws2812Source.Contains('.mirror_x = false') -and $ws2812Source.Contains('.rotation = 1')) "WS2812 mapping must rotate the complete display by 180 degrees"
-Assert-True ($ws2812Source.Contains('led_pixel_format = LED_PIXEL_FORMAT_GRB')) "WS2812 driver must use led_strip 2.x pixel format field"
-Assert-True (-not $ws2812Source.Contains('color_component_format')) "WS2812 driver uses removed led_strip config field"
-Assert-True ($ws2812Source.Contains('led_strip_set_pixel')) "WS2812 driver must use public led_strip_set_pixel API"
-Assert-True ($ws2812Source.Contains('led_strip_refresh')) "WS2812 driver must use public led_strip_refresh API"
+Assert-True ($ws2812Source.Contains('s_tx_buf') -and
+             $ws2812Source.Contains('WS2812 wire order is GRB')) "WS2812 driver must encode GRB bytes explicitly"
+Assert-True ($ws2812Source.Contains('rmt_new_bytes_encoder')) "WS2812 driver must use the native bytes encoder"
+Assert-True (-not $ws2812Source.Contains('led_strip_set_pixel') -and
+             -not $ws2812Source.Contains('led_strip_refresh')) "WS2812 driver must not call the unbounded managed refresh"
 Assert-True (-not $ws2812Source.Contains('s_strip->set_pixel')) "WS2812 driver must not access opaque led_strip handle"
 Assert-True (-not $ws2812Source.Contains('s_strip->refresh')) "WS2812 driver must not access opaque led_strip handle"
 Assert-True ($ws2812Source.Contains('#include "driver/gpio.h"')) "WS2812 driver must configure GPIO output quality"
@@ -412,13 +514,53 @@ Assert-True ($displaySource.Contains('diag.grayscale') -and
 Assert-True ($displaySource.Contains('WS2812_DIAGNOSTIC_INTERVAL 60')) "WS2812 diagnostics summary interval must be 60 changed frames"
 Assert-True ($displaySource.Contains('WS2812_KEEPALIVE_REFRESH_MS 250')) "validated main frames must be reasserted every 250 ms"
 Assert-True ($displaySource.Contains('drop non-grayscale main frame') -and
-             $displaySource.Contains('if (!diag.grayscale)')) "non-grayscale main frames must be dropped before transmission"
+             $displaySource.Contains('!diag.grayscale &&') -and
+             $displaySource.Contains('DISPLAY_STATUS_LAMP_X')) "non-grayscale main frames must be dropped except for the status lamp"
 Assert-True ($displaySource.Contains('s_last_main_force_refresh')) "main frame keepalive timing state is missing"
+Assert-True ($displaySource.Contains('display_animation_state_t') -and
+             $displaySource.Contains('active') -and
+             $displaySource.Contains('animation_id') -and
+             $displaySource.Contains('current_frame') -and
+             $displaySource.Contains('next_frame_tick') -and
+             $displaySource.Contains('started_at') -and
+             $displaySource.Contains('attempted_frames') -and
+             $displaySource.Contains('successful_frames') -and
+             $displaySource.Contains('max_refresh_ms')) "display animation state is missing"
+Assert-True (-not $displaySource.Contains('for (uint8_t phase = 0; phase < FLOW_FRAME_COUNT; ++phase)')) "half-hour animation must not block in a 32-frame loop"
+Assert-True ($displaySource.Contains('RUNTIME_EVENT_DISPLAY_ANIMATION') -and
+             $displaySource.Contains('DISPLAY_ANIMATION_BEGIN') -and
+             $displaySource.Contains('DISPLAY_ANIMATION_COMPLETE') -and
+             $displaySource.Contains('DISPLAY_ANIMATION_ABORT')) "animation lifecycle events are missing"
+Assert-True ($displaySource.Contains('DISPLAY_SUMMARY_INTERVAL_MS 60000') -and
+             $displaySource.Contains('runtime_event_log_append')) "display summary and event persistence are missing"
+Assert-True ($displayHeader.Contains('app_display_get_health') -and
+             $displayHeader.Contains('app_display_health_t')) "display health snapshot API is missing"
+Assert-True ($healthSource.Contains('app_display_get_health') -and
+             $healthSource.Contains('2 seconds') -and
+             $healthSource.Contains('RUNTIME_EVENT_DISPLAY_ERROR')) "health task must diagnose a stalled display task"
 Assert-True ($ws2812Source.Contains('s_displayed_brightness == brightness_percent')) "brightness changes must still refresh WS2812"
 Assert-True ($ws2812Source.Contains('memcpy(s_displayed_frame, s_frame, sizeof(s_frame))')) "only a successful WS2812 refresh may become the displayed frame"
+Assert-True ($ws2812Source.Contains('rmt_new_tx_channel') -and
+             $ws2812Source.Contains('rmt_transmit') -and
+             $ws2812Source.Contains('rmt_tx_wait_all_done') -and
+             $ws2812Source.Contains('WS2812_TX_TIMEOUT_MS') -and
+             $ws2812Source.Contains('ESP_ERR_TIMEOUT')) "WS2812 refresh must use bounded native RMT transmission"
+Assert-True ($ws2812Source.Contains('WS2812_RECOVERY_BACKOFF_INITIAL_MS') -and
+             $ws2812Source.Contains('WS2812_RECOVERY_BACKOFF_MAX_MS') -and
+             $ws2812Source.Contains('s_retry_not_before_us')) "WS2812 recovery must use bounded backoff"
+Assert-True (-not $ws2812Source.Contains('rmt_tx_wait_all_done(s_rmt_channel, -1)') -and
+             -not $ws2812Source.Contains('led_strip_refresh')) "WS2812 driver must not retain an unbounded managed refresh"
 Assert-True ($sdkconfig.Contains('CONFIG_BT_ENABLED=y')) "Bluetooth must be enabled for BluFi"
 Assert-True ($sdkconfig.Contains('CONFIG_BT_NIMBLE_ENABLED=y')) "NimBLE must be enabled for BluFi"
 Assert-True ($sdkconfig.Contains('CONFIG_BT_NIMBLE_BLUFI_ENABLE=y')) "NimBLE BluFi must be enabled"
+Assert-True ($bleProvisionSource.Contains('esp_read_mac(mac, ESP_MAC_BT)') -and
+             $bleProvisionSource.Contains('"%s-%02X%02X%02X"') -and
+             $bleProvisionSource.Contains('mac[3], mac[4], mac[5]')) "BLE advertising name must append the Bluetooth MAC address suffix"
+Assert-True ($bleProvisionSource.Contains('#define BLE_FIXED_ADV_NAME "ESPARK"') -and
+             -not $bleProvisionSource.Contains('PowerGo')) "BLE advertising name must use the ESPARK prefix without PowerGo"
+Assert-True ($bleProvisionSource.Contains('ble_gap_adv_rsp_set_fields(&scan_rsp)') -and
+             $bleProvisionSource.Contains('scan_rsp.name = (uint8_t *)s_adv_name') -and
+             $bleProvisionSource.Contains('ble_gap_adv_start(s_own_addr_type')) "BLE advertising name must use the scan response when it exceeds the advertising payload"
 Assert-True ($sdkconfig.Contains('CONFIG_MBEDTLS_DHM_C=y')) "MbedTLS DHM must be enabled for BluFi security"
 Assert-True ($sdkconfigDefaults.Contains('CONFIG_MBEDTLS_DHM_C=y')) "default config must enable MbedTLS DHM"
 Assert-True ($sdkconfig.Contains('CONFIG_MBEDTLS_DHM_C=y')) "MbedTLS DHM must remain enabled for BluFi"
@@ -487,6 +629,14 @@ Assert-True ($wifiSource.Contains('record_sta_connection_failure') -and
 Assert-True ($wifiSource.Contains('#define WIFI_FAST_RETRY_DELAY_MS 1000')) "first Wi-Fi retry must use a 1 second delay"
 Assert-True ($wifiSource.Contains('#define WIFI_BACKGROUND_RETRY_DELAY_MS 10000')) "post-failure Wi-Fi retry must use a 10 second delay"
 Assert-True ($wifiSource.Contains('#define WIFI_RESCAN_FAILURE_THRESHOLD 2')) "Wi-Fi must scan only after two direct failures"
+Assert-True ($wifiSource.Contains('#define WIFI_STA_CONNECT_TIMEOUT_MS 15000')) "STA connection attempts must time out after 15 seconds"
+Assert-True ($wifiSource.Contains('#define WIFI_STA_TIMEOUT_DISCONNECT_GRACE_MS 2000')) "STA timeout recovery must bound the disconnect-event wait"
+Assert-True ($wifiSource.Contains('sta_connect_guard_task')) "Wi-Fi manager must run a STA connection guard task"
+Assert-True ($wifiSource.Contains('state == WIFI_STA_STATE_CONNECTING ||') -and
+             $wifiSource.Contains('state == WIFI_STA_STATE_WAIT_IP')) "STA guard must cover both authentication and DHCP wait states"
+Assert-True ($wifiSource.Contains('record_sta_connection_failure("connect timeout"')) "STA guard must count a stalled connection as a failure"
+Assert-True ($wifiSource.Contains('WIFI_LOCAL_CONNECT_TIMEOUT_REASON')) "STA timeout events must be distinguishable in the runtime log"
+Assert-True ($wifiSource.Contains('timeout recovery disconnect event missing')) "STA guard must recover when the Wi-Fi driver omits a disconnect callback"
 Assert-True ($wifiSource.Contains('has_last_wifi_ssid')) "Wi-Fi must prefer the last successful SSID"
 Assert-True ($wifiSource.Contains('app_config_save_last_wifi_ssid')) "Wi-Fi must persist a newly successful SSID"
 Assert-True (-not $wifiSource.Contains('app_config_t requested_cfg')) "saved-profile connect must not copy the full app config onto the caller stack"
@@ -496,6 +646,19 @@ Assert-True ($configSource.Contains('erase_optional_key(handle, "last_ssid")')) 
 Assert-True ($mainSource.Contains('failure_count == 3U')) "UI must show failure page when the third connection failure is reached"
 Assert-True ($mainSource.Contains('app_display_show_network_success')) "main must show the network success page on STA transition"
 Assert-True ($mainSource.Contains('app_display_show_network_failure')) "main must show the network failure page after three failures"
+Assert-True ($mainSource.Contains('app_display_set_wifi_fault(true)') -and
+             $mainSource.Contains('app_display_set_wifi_fault(false)')) "Wi-Fi failure and got-IP recovery must update only the Wi-Fi fault"
+Assert-True ($bleProvisionSource.Contains('app_display_set_bluetooth_connected(true)') -and
+             $bleProvisionSource.Contains('app_display_set_bluetooth_connected(false)')) "BLE connection state must drive the status lamp"
+Assert-True ($mainSource.Contains('app_display_set_weather_fetching') -or
+             $weatherSource.Contains('app_display_set_weather_fetching')) "weather fetching state must drive the status lamp"
+Assert-True ($weatherSource.Contains('app_display_set_weather_fault(true)') -and
+             $weatherSource.Contains('app_display_set_weather_fault(false)')) "weather publication must manage only the weather fault"
+$weatherPublish = [regex]::Match($weatherSource, '(?s)static void publish_pending_weather\(void\).*?\n\}')
+Assert-True ($weatherPublish.Success -and
+             $weatherPublish.Value.Contains('app_display_set_weather_fault(false)') -and
+             $weatherPublish.Value.Contains('app_display_set_weather_fault(true)') -and
+             -not $weatherPublish.Value.Contains('app_display_set_wifi_fault')) "weather publish must clear or set only its own fault"
 Assert-True ($mainSource.Contains('app_display_init(cfg.has_wifi && cfg.wifi_count > 0)')) "main must tell display whether a saved Wi-Fi profile is expected"
 Assert-True ($timeSource.Contains('s_sntp_events') -and
              $timeSource.Contains('s_location_events')) "SNTP and location must use independent event channels"
@@ -508,6 +671,26 @@ Assert-True (-not $wifiSource.Contains('ESP_ERROR_CHECK(esp_wifi_set_config(WIFI
 Assert-True (-not $wifiSource.Contains('ESP_ERROR_CHECK(esp_wifi_connect())')) "runtime STA connect errors must not abort"
 Assert-True ($mainSource.Contains('const bool connected = wifi_manager_is_sta_connected()') -and
              $mainSource.Contains('if (connected && !s_last_sta_connected)')) "time and weather requests must be gated on STA IP state"
+Assert-True ($wifiSource.Contains('wifi_event_work_task') -and
+             $wifiSource.Contains('WIFI_WORK_GOT_IP') -and
+             $wifiSource.Contains('xQueueSend')) "Wi-Fi event handling must defer heavy work to a background task"
+ $wifiHandler = [regex]::Match($wifiSource, '(?s)static void wifi_event_handler\(.*?\n\}')
+Assert-True ($wifiHandler.Success -and
+             -not $wifiHandler.Value.Contains('runtime_event_log_append') -and
+             -not $wifiHandler.Value.Contains('app_config_save_last_wifi_ssid') -and
+             -not $wifiHandler.Value.Contains('log_sta_network_info') -and
+             -not $wifiHandler.Value.Contains('refresh_sta_runtime_info') -and
+             -not $wifiHandler.Value.Contains('record_sta_connection_failure')) "Wi-Fi callbacks must not perform heavy NVS or network diagnostics"
+Assert-True ($wifiSource.Contains('wifi_event_work_task, "wifi_event_work", 4096')) "Wi-Fi background work task must have independent stack"
+Assert-True ($wifiSource.Contains('Publish the connected edge first') -and
+             $wifiSource.Contains('runtime_event_log_append(RUNTIME_EVENT_WIFI_CONNECTED')) "GOT_IP worker must publish the connection edge before diagnostics"
+Assert-True ($mainSource.Contains('wifi_manager_get_event_work_task_handle') -and
+             $healthSource.Contains('wifi_event_work')) "health monitor must include Wi-Fi background worker"
+Assert-True ($wifiSource.Contains('wifi_event_handler') -and
+             $wifiSource.Contains('wifi_event_handler') -and
+             $wifiSource.Contains('return;')) "Wi-Fi callbacks must return after lightweight state/event handling"
+Assert-True ($sdkconfig.Contains('CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096') -and
+             $sdkconfigDefaults.Contains('CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096')) "system event task stack must be raised to 4096 bytes"
 Assert-True ($mainCmake.Contains('        driver')) "main component must depend on legacy driver for driver/i2c.h"
 Assert-True ($appLogHeader.Contains('APP_LOG_FILE') -and
              $appLogHeader.Contains('__func__') -and

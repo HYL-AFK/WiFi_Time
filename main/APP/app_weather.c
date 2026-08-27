@@ -1,6 +1,7 @@
 #include "app_weather.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -11,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+#include "app_display.h"
 #include "app_log.h"
 #include "common/weather_snapshot.h"
 #include "common/location_snapshot.h"
@@ -18,12 +20,23 @@
 #include "wifi_manager.h"
 
 #define WEATHER_NET_EVENT BIT0
+#define WEATHER_FIRST_WINDOW_START_MS (20 * 60 * 1000)
+#define WEATHER_FETCH_WINDOW_MS (10 * 60 * 1000)
+#define WEATHER_REFRESH_PERIOD_MS (30 * 60 * 1000)
 
 static EventGroupHandle_t s_events;
 static char s_body[2048];
 static size_t s_len;
 static bool s_body_overflow;
 static TaskHandle_t s_weather_task_handle;
+static TickType_t s_weather_task_started;
+static bool s_initial_request_done;
+static bool s_window_active;
+static bool s_window_success;
+static uint32_t s_window_index;
+static TickType_t s_window_end_tick;
+static weather_snapshot_t s_pending_snapshot;
+static bool s_pending_snapshot_valid;
 static const char *TAG = "app_weather";
 
 static const char *weather_condition_name(int weather_code)
@@ -52,8 +65,10 @@ static esp_err_t http_event(esp_http_client_event_t *event)
     return ESP_OK;
 }
 
-static void refresh_weather(void)
+static bool refresh_weather(weather_snapshot_t *out)
 {
+    if (out != NULL) memset(out, 0, sizeof(*out));
+    app_display_set_weather_fetching(true);
     s_len = 0;
     s_body[0] = '\0';
     s_body_overflow = false;
@@ -62,7 +77,8 @@ static void refresh_weather(void)
     /* 定位失败时不使用伪造坐标，保留上一次有效天气或 RTC 温度。 */
     if (!location_snapshot_get(&location)) {
         APP_LOGW(TAG, "skip weather request: no valid location");
-        return;
+        app_display_set_weather_fetching(false);
+        return false;
     }
 
     char url[512];
@@ -72,7 +88,8 @@ static void refresh_weather(void)
         location.latitude, location.longitude);
     if (url_len < 0 || (size_t)url_len >= sizeof(url)) {
         APP_LOGE(TAG, "weather URL buffer is too small");
-        return;
+        app_display_set_weather_fetching(false);
+        return false;
     }
 
     esp_http_client_config_t cfg = {
@@ -82,7 +99,10 @@ static void refresh_weather(void)
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (client == NULL) return;
+    if (client == NULL) {
+        app_display_set_weather_fetching(false);
+        return false;
+    }
 
     esp_err_t request_err = esp_http_client_perform(client);
     int status = esp_http_client_get_status_code(client);
@@ -123,9 +143,10 @@ static void refresh_weather(void)
             if (has_temperature && has_weather_code) {
                 snapshot.valid = true;
                 snapshot.temperature_valid = true;
+                snapshot.network_error = false;
                 snapshot.temperature_source = WEATHER_TEMP_SOURCE_NETWORK;
                 snapshot.updated_at = time(NULL);
-                weather_snapshot_set(&snapshot);
+                if (out != NULL) *out = snapshot;
                 APP_LOGI(TAG,
                          "weather code=%d condition=%s temperature_x10=%d",
                          snapshot.weather_code,
@@ -135,6 +156,9 @@ static void refresh_weather(void)
                                          snapshot.weather_code,
                                          (int32_t)(snapshot.temperature_c * 10.0f),
                                          0);
+                esp_http_client_cleanup(client);
+                app_display_set_weather_fetching(false);
+                return true;
             } else {
                 APP_LOGW(TAG, "weather JSON missing required current fields");
                 runtime_event_log_append(RUNTIME_EVENT_WEATHER_FAILURE, status, 3, 0);
@@ -147,19 +171,92 @@ static void refresh_weather(void)
     }
 
     esp_http_client_cleanup(client);
+    app_display_set_weather_fetching(false);
+    return false;
+}
+
+static void publish_pending_weather(void)
+{
+    if (s_pending_snapshot_valid) {
+        weather_snapshot_set(&s_pending_snapshot);
+        s_pending_snapshot_valid = false;
+        app_display_set_weather_fault(false);
+        app_display_show_weather_refresh_success();
+        return;
+    }
+
+    weather_snapshot_t failed = {0};
+    failed.network_error = true;
+    weather_snapshot_set(&failed);
+    app_display_set_weather_fault(true);
+    app_display_show_weather_refresh_failure();
+}
+
+static bool try_weather_request(void)
+{
+    if (!wifi_manager_is_sta_connected()) return false;
+
+    weather_snapshot_t snapshot = {0};
+    if (!refresh_weather(&snapshot)) return false;
+
+    s_pending_snapshot = snapshot;
+    s_pending_snapshot_valid = true;
+    s_window_success = true;
+    return true;
+}
+
+static void start_weather_window(uint32_t index, TickType_t start_tick)
+{
+    s_window_index = index;
+    s_window_active = true;
+    s_window_success = false;
+    s_pending_snapshot_valid = false;
+    s_window_end_tick = start_tick + pdMS_TO_TICKS(WEATHER_FETCH_WINDOW_MS);
+    (void)try_weather_request();
 }
 
 static void weather_task(void *arg)
 {
     (void)arg;
+    s_weather_task_started = xTaskGetTickCount();
+    s_window_index = UINT32_MAX;
     for (;;) {
         EventBits_t bits = xEventGroupWaitBits(
-            s_events, WEATHER_NET_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(600000));
-        if ((bits & WEATHER_NET_EVENT) != 0 || bits == 0) {
-            if (!wifi_manager_is_sta_connected()) {
-                continue;
+            s_events, WEATHER_NET_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(1000));
+        const TickType_t now = xTaskGetTickCount();
+        const TickType_t elapsed = now - s_weather_task_started;
+
+        if ((bits & WEATHER_NET_EVENT) != 0) {
+            if (!s_initial_request_done && try_weather_request()) {
+                weather_snapshot_t initial = {0};
+                if (s_pending_snapshot_valid) {
+                    initial = s_pending_snapshot;
+                    s_pending_snapshot_valid = false;
+                    weather_snapshot_set(&initial);
+                    app_display_set_weather_fault(false);
+                    s_initial_request_done = true;
+                }
+            } else if (s_window_active && !s_window_success) {
+                (void)try_weather_request();
             }
-            refresh_weather();
+        }
+
+        if (!s_window_active &&
+            elapsed >= pdMS_TO_TICKS(WEATHER_FIRST_WINDOW_START_MS)) {
+            const uint32_t index = (uint32_t)((elapsed -
+                                               pdMS_TO_TICKS(WEATHER_FIRST_WINDOW_START_MS)) /
+                                              pdMS_TO_TICKS(WEATHER_REFRESH_PERIOD_MS));
+            if (s_window_index == UINT32_MAX || index > s_window_index) {
+                const TickType_t start_tick = s_weather_task_started +
+                                              pdMS_TO_TICKS(WEATHER_FIRST_WINDOW_START_MS) +
+                                              index * pdMS_TO_TICKS(WEATHER_REFRESH_PERIOD_MS);
+                start_weather_window(index, start_tick);
+            }
+        }
+
+        if (s_window_active && (int32_t)(now - s_window_end_tick) >= 0) {
+            publish_pending_weather();
+            s_window_active = false;
         }
     }
 }
