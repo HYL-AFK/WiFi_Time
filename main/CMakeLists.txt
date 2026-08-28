@@ -23,7 +23,7 @@ idf_component_register(
         driver
         esp_driver_i2c
         esp_driver_gpio
-        esp_driver_rmt
+        esp_driver_spi
         esp_driver_tsens
         esp_event
         esp_http_client

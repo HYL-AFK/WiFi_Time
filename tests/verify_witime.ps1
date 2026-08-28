@@ -487,8 +487,9 @@ Assert-True ($drawio.OuterXml.Contains('GPIO10')) "missing GPIO10 mapping"
 Assert-True ((Get-Content -Raw main/drivers/ws2812_matrix.c).Contains('serpentine')) "missing serpentine implementation"
 Assert-True ($ws2812Source.Contains('.serpentine = false') -and $ws2812Source.Contains('.mirror_x = false') -and $ws2812Source.Contains('.rotation = 1')) "WS2812 mapping must rotate the complete display by 180 degrees"
 Assert-True ($ws2812Source.Contains('s_tx_buf') -and
-             $ws2812Source.Contains('WS2812 wire order is GRB')) "WS2812 driver must encode GRB bytes explicitly"
-Assert-True ($ws2812Source.Contains('rmt_new_bytes_encoder')) "WS2812 driver must use the native bytes encoder"
+             $ws2812Source.Contains('encode_grb_frame') -and
+             $ws2812Source.Contains('const uint8_t grb[3]')) "WS2812 driver must encode GRB bytes explicitly"
+Assert-True ($ws2812Source.Contains('#include "driver/spi_master.h"')) "WS2812 driver must use the SPI master driver"
 Assert-True (-not $ws2812Source.Contains('led_strip_set_pixel') -and
              -not $ws2812Source.Contains('led_strip_refresh')) "WS2812 driver must not call the unbounded managed refresh"
 Assert-True (-not $ws2812Source.Contains('s_strip->set_pixel')) "WS2812 driver must not access opaque led_strip handle"
@@ -499,7 +500,7 @@ Assert-True ($ws2812Source.Contains('gpio_set_direction(WS2812_GPIO, GPIO_MODE_O
              $ws2812Source.Contains('gpio_set_level(WS2812_GPIO, 0)')) "WS2812 data line must be driven low before RMT initialization"
 Assert-True ($ws2812Source.Contains('GPIO_PULLDOWN_ONLY')) "WS2812 data line must retain an internal pull-down between transmissions"
 Assert-True ($ws2812Source.Contains('esp_rom_delay_us(300)')) "WS2812 startup low level must exceed the latch interval"
-Assert-True ($ws2812Source.Contains('.flags.with_dma = true')) "WS2812 RMT output must use DMA"
+Assert-True ($ws2812Source.Contains('MALLOC_CAP_DMA')) "WS2812 SPI TX buffer must be DMA-capable"
 Assert-True ($ws2812Source.Contains('s_displayed_frame')) "WS2812 driver must retain the last transmitted frame"
 Assert-True ($ws2812Source.Contains('s_displayed_frame_valid')) "WS2812 driver must track whether a frame was transmitted"
 Assert-True ($ws2812Source.Contains('memcmp(s_frame, s_displayed_frame, sizeof(s_frame)) == 0')) "unchanged WS2812 frames must be detected"
@@ -540,16 +541,26 @@ Assert-True ($healthSource.Contains('app_display_get_health') -and
              $healthSource.Contains('RUNTIME_EVENT_DISPLAY_ERROR')) "health task must diagnose a stalled display task"
 Assert-True ($ws2812Source.Contains('s_displayed_brightness == brightness_percent')) "brightness changes must still refresh WS2812"
 Assert-True ($ws2812Source.Contains('memcpy(s_displayed_frame, s_frame, sizeof(s_frame))')) "only a successful WS2812 refresh may become the displayed frame"
-Assert-True ($ws2812Source.Contains('rmt_new_tx_channel') -and
-             $ws2812Source.Contains('rmt_transmit') -and
-             $ws2812Source.Contains('rmt_tx_wait_all_done') -and
+Assert-True ($ws2812Source.Contains('spi_bus_initialize') -and
+             $ws2812Source.Contains('SPI_DMA_CH_AUTO') -and
+             $ws2812Source.Contains('spi_bus_add_device') -and
+             $ws2812Source.Contains('spi_device_queue_trans') -and
+             $ws2812Source.Contains('spi_device_get_trans_result') -and
              $ws2812Source.Contains('WS2812_TX_TIMEOUT_MS') -and
-             $ws2812Source.Contains('ESP_ERR_TIMEOUT')) "WS2812 refresh must use bounded native RMT transmission"
+             $ws2812Source.Contains('ESP_ERR_TIMEOUT')) "WS2812 refresh must use bounded SPI DMA transmission"
+Assert-True ($ws2812Source.Contains('.flags = SPI_DEVICE_HALFDUPLEX')) "WS2812 SPI device must be transmit-only"
+Assert-True ($ws2812Source.Contains('finish_pending_transaction(pdMS_TO_TICKS(WS2812_TX_TIMEOUT_MS))')) "first SPI frame must wait for bounded completion"
 Assert-True ($ws2812Source.Contains('WS2812_RECOVERY_BACKOFF_INITIAL_MS') -and
              $ws2812Source.Contains('WS2812_RECOVERY_BACKOFF_MAX_MS') -and
              $ws2812Source.Contains('s_retry_not_before_us')) "WS2812 recovery must use bounded backoff"
-Assert-True (-not $ws2812Source.Contains('rmt_tx_wait_all_done(s_rmt_channel, -1)') -and
-             -not $ws2812Source.Contains('led_strip_refresh')) "WS2812 driver must not retain an unbounded managed refresh"
+Assert-True ($ws2812Source.Contains('WS2812_SYMBOL_BITS') -and
+             $ws2812Source.Contains('WS2812_LATCH_BYTES') -and
+             $ws2812Source.Contains('encode_grb_frame')) "WS2812 driver must encode SPI symbols and latch tail"
+Assert-True (-not $ws2812Source.Contains('rmt_') -and
+             -not $ws2812Source.Contains('driver/rmt_') -and
+             -not $ws2812Source.Contains('led_strip_refresh') -and
+             -not $ws2812Source.Contains('spi_device_transmit')) "WS2812 driver must not retain RMT or unbounded transmit APIs"
+Assert-True ($mainCmake.Contains('esp_driver_spi') -and -not $mainCmake.Contains('esp_driver_rmt')) "main component must depend on SPI instead of RMT"
 Assert-True ($sdkconfig.Contains('CONFIG_BT_ENABLED=y')) "Bluetooth must be enabled for BluFi"
 Assert-True ($sdkconfig.Contains('CONFIG_BT_NIMBLE_ENABLED=y')) "NimBLE must be enabled for BluFi"
 Assert-True ($sdkconfig.Contains('CONFIG_BT_NIMBLE_BLUFI_ENABLE=y')) "NimBLE BluFi must be enabled"
