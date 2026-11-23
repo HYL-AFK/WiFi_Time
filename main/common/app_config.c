@@ -27,6 +27,7 @@ static esp_err_t erase_optional_key(nvs_handle_t handle, const char *key)
  * - ble_name：用户显示名，不再直接作为 BLE 广播名。
  * - ap_name：设备 SoftAP 热点名称。
  * - ap_pass：设备 SoftAP 热点密码。
+ * - fix_loc：用户手动配置的固定坐标（两个 double），优先于 IP 定位。
  *
  * 维护原则：
  * - 其他模块不要直接读写这些 key。
@@ -146,6 +147,15 @@ esp_err_t app_config_save(const app_config_t *cfg)
         if (err != ESP_OK) goto fail;
     }
 
+    if (cfg->has_fixed_location) {
+        const double fixed_coords[2] = {cfg->fixed_latitude, cfg->fixed_longitude};
+        err = nvs_set_blob(handle, "fix_loc", fixed_coords, sizeof(fixed_coords));
+        if (err != ESP_OK) goto fail;
+    } else {
+        err = erase_optional_key(handle, "fix_loc");
+        if (err != ESP_OK) goto fail;
+    }
+
     err = nvs_set_i32(handle, "wifi_count", cfg->wifi_count);
     if (err != ESP_OK) goto fail;
     err = nvs_commit(handle);
@@ -218,6 +228,17 @@ void app_config_load(app_config_t *cfg)
     len = sizeof(cfg->ap_pass);
     if (nvs_get_str(handle, "ap_pass", cfg->ap_pass, &len) == ESP_OK) {
         cfg->has_ap_pass = true;
+    }
+
+    double fixed_coords[2] = {0};
+    size_t fixed_len = sizeof(fixed_coords);
+    if (nvs_get_blob(handle, "fix_loc", fixed_coords, &fixed_len) == ESP_OK &&
+        fixed_len == sizeof(fixed_coords) &&
+        fixed_coords[0] >= -90.0 && fixed_coords[0] <= 90.0 &&
+        fixed_coords[1] >= -180.0 && fixed_coords[1] <= 180.0) {
+        cfg->fixed_latitude = fixed_coords[0];
+        cfg->fixed_longitude = fixed_coords[1];
+        cfg->has_fixed_location = true;
     }
 
     bool erased_legacy_location = false;

@@ -2,6 +2,8 @@ idf_component_register(
     SRCS
         "main.c"
         "common/app_config.c"
+        "common/app_fault.c"
+        "common/device_name.c"
         "common/location_snapshot.c"
         "common/runtime_event_log.c"
         "common/time_snapshot.c"

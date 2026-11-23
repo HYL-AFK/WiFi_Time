@@ -32,12 +32,19 @@ typedef struct {
     char last_wifi_ssid[WIFI_SSID_MAX_LEN + 1];
     bool has_last_wifi_ssid;
 
-    /* User display name. BLE advertising name stays fixed as ESPARK-XXXXXX. */
+    /* User display name. BLE advertising name stays fixed as ESPARK_XXXXXX. */
     char ble_name[BLE_NAME_MAX_LEN + 1];
 
-    /* SoftAP name and password. Passwords shorter than 8 are treated as open AP by ESP-IDF. */
+    /* SoftAP name and password. The AP name is overridden at boot by the unified
+       device name (ESPARK_<WiFi STA MAC last six hex digits>); passwords shorter
+       than 8 are treated as open AP by ESP-IDF. */
     char ap_name[AP_NAME_MAX_LEN + 1];
     char ap_pass[AP_PASS_MAX_LEN + 1];
+
+    /* User-configured fixed coordinates (BluFi custom data). When set, IP geolocation is skipped. */
+    double fixed_latitude;
+    double fixed_longitude;
+    bool has_fixed_location;
 
     /* Distinguish user-configured values from defaults. */
     bool has_wifi;

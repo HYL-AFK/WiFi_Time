@@ -18,6 +18,8 @@
 
 #include "app/app_rtc.h"
 #include "app/app_weather.h"
+#include "common/app_config.h"
+#include "common/app_fault.h"
 #include "common/app_log.h"
 #include "common/location_snapshot.h"
 #include "common/time_snapshot.h"
@@ -26,6 +28,8 @@
 #define TIME_NET_EVENT BIT0
 #define LOCATION_BODY_MAX 2048
 #define LOCATION_CHANGE_THRESHOLD_DEGREES 0.05
+/* 手动配置固定坐标时使用的时区标识（与设备默认 CST-8 一致）。 */
+#define LOCATION_FIXED_TIMEZONE "Asia/Shanghai"
 #define SNTP_SERVER_TIMEOUT_MS 3000
 #define TIME_RESYNC_PERIOD_MS (4 * 60 * 60 * 1000)
 #define SNTP_SYNC_ATTEMPT_TIMEOUT_MS 10000
@@ -99,6 +103,17 @@ static const char *get_location_timezone(cJSON *root)
     return NULL;
 }
 
+/* 解析定位服务返回的国家代码（ipwho.is 用 country_code，ipapi.co 用 country）。 */
+static const char *get_location_country(cJSON *root)
+{
+    cJSON *country = cJSON_GetObjectItem(root, "country_code");
+    if (country == NULL || !cJSON_IsString(country)) {
+        country = cJSON_GetObjectItem(root, "country");
+    }
+    if (country == NULL || !cJSON_IsString(country)) return NULL;
+    return country->valuestring;
+}
+
 static bool parse_location_response(bool nested_timezone, bool *changed)
 {
     cJSON *root = cJSON_Parse(s_location_body);
@@ -144,6 +159,17 @@ static bool parse_location_response(bool nested_timezone, bool *changed)
     if (ready) {
         APP_LOGI(TAG, "location updated: latitude=%.6f longitude=%.6f timezone=%s",
                  latitude, longitude, timezone);
+        /* 境外定位通常意味着设备走了代理/VPN 出口，天气会与真实位置不符。 */
+        const char *country = get_location_country(root);
+        if (country == NULL || strcmp(country, "CN") == 0 ||
+            strcmp(country, "China") == 0) {
+            app_fault_clear(APP_FAULT_P103_LOCATION);
+        } else {
+            APP_LOGW(TAG,
+                     "location country=%s (expected CN); device may be on a proxy/VPN exit",
+                     country);
+            app_fault_raise(APP_FAULT_P103_LOCATION);
+        }
         if (strcmp(timezone, "Asia/Shanghai") == 0) {
             if (app_time_prepare_timezone() == ESP_OK) {
                 APP_LOGI(TAG, "timezone applied: Asia/Shanghai -> CST-8");
@@ -196,11 +222,48 @@ static bool request_location(const char *url, bool nested_timezone, bool *change
     return ready;
 }
 
+/* 用户手动配置的固定坐标优先于 IP 定位：运营商链路的 IP 定位可能定位到错误城市，
+   只有显式配置的坐标才能保证天气与真实位置一致。 */
+static bool apply_configured_fixed_location(bool *changed)
+{
+    app_config_t cfg;
+    app_config_load(&cfg);
+    if (!cfg.has_fixed_location) {
+        return false;
+    }
+
+    location_snapshot_t previous = {0};
+    const bool had_previous = location_snapshot_get(&previous);
+    const bool location_changed =
+        !had_previous ||
+        fabs(cfg.fixed_latitude - previous.latitude) >= LOCATION_CHANGE_THRESHOLD_DEGREES ||
+        fabs(cfg.fixed_longitude - previous.longitude) >= LOCATION_CHANGE_THRESHOLD_DEGREES ||
+        strcmp(previous.timezone, LOCATION_FIXED_TIMEZONE) != 0;
+
+    if (location_snapshot_set(cfg.fixed_latitude, cfg.fixed_longitude,
+                              LOCATION_FIXED_TIMEZONE) != ESP_OK) {
+        return false;
+    }
+
+    APP_LOGI(TAG, "fixed location applied: latitude=%.6f longitude=%.6f",
+             cfg.fixed_latitude, cfg.fixed_longitude);
+    /* 用户显式配置的坐标视为已知情，清除境外定位告警。 */
+    app_fault_clear(APP_FAULT_P103_LOCATION);
+    if (changed != NULL) *changed = location_changed;
+    return true;
+}
+
 /* 主接口拒绝访问时使用备用接口，避免天气功能依赖单一定位服务。 */
 static bool refresh_location(bool *changed)
 {
-    /* 优先使用主定位服务，失败后切换备用服务；已有位置缓存继续保留。 */
     if (changed != NULL) *changed = false;
+
+    /* 固定坐标优先，配置后不再请求 IP 定位。 */
+    if (apply_configured_fixed_location(changed)) {
+        return true;
+    }
+
+    /* 优先使用主定位服务，失败后切换备用服务；已有位置缓存继续保留。 */
     if (request_location("https://ipwho.is/", true, changed) ||
         request_location("https://ipapi.co/json/", false, changed)) {
         return true;
@@ -346,7 +409,7 @@ esp_err_t app_time_init(void)
                     &s_sntp_task_handle) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
-    return xTaskCreate(location_task, "location_task", 4096, NULL, 3,
+    return xTaskCreate(location_task, "location_task", 8192, NULL, 3,
                        &s_location_task_handle) == pdPASS
                ? ESP_OK : ESP_ERR_NO_MEM;
 }
@@ -365,4 +428,20 @@ void app_time_notify_network(void)
 {
     if (s_sntp_events != NULL) xEventGroupSetBits(s_sntp_events, TIME_NET_EVENT);
     if (s_location_events != NULL) xEventGroupSetBits(s_location_events, TIME_NET_EVENT);
+}
+
+esp_err_t app_time_apply_fixed_location(double latitude, double longitude)
+{
+    if (latitude < -90.0 || latitude > 90.0 ||
+        longitude < -180.0 || longitude > 180.0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (location_snapshot_set(latitude, longitude, LOCATION_FIXED_TIMEZONE) != ESP_OK) {
+        return ESP_FAIL;
+    }
+
+    APP_LOGI(TAG, "fixed location applied immediately: latitude=%.6f longitude=%.6f",
+             latitude, longitude);
+    app_weather_notify_network();
+    return ESP_OK;
 }

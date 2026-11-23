@@ -80,3 +80,12 @@ Desktop.ini
 
 # 外部硬件资料，不随固件源码提交
 开发资料/
+
+# 本地头脑风暴/会话缓存，不提交
+.superpowers/
+
+# 本地取证产物（NVS 转储 / 串口日志 / 解码文本，含设备实际网络与位置数据）
+tmp/*.bin
+tmp/*.log
+tmp/*.txt
+tmp/*.json

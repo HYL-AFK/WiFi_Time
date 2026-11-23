@@ -8,12 +8,15 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "common/app_fault.h"
 #include "common/time_snapshot.h"
 #include "common/weather_snapshot.h"
 #include "drivers/ds3231.h"
 #include "app_log.h"
 
 #define RTC_FAILURE_LOG_INTERVAL 10U
+/* 连续读失败达到该次数视为 RTC 不可用，挂载等级 2 异常 P101。 */
+#define RTC_FAULT_THRESHOLD 10U
 
 static const char *TAG = "app_rtc";
 
@@ -37,6 +40,9 @@ static void read_rtc_to_snapshot(void)
     esp_err_t err = ds3231_read(&value);
     if (err != ESP_OK) {
         s_rtc_time_failures++;
+        if (s_rtc_time_failures >= RTC_FAULT_THRESHOLD) {
+            app_fault_raise(APP_FAULT_P101_RTC);
+        }
         if (should_log_failure(s_rtc_time_failures)) {
             APP_LOG_ERR(TAG, err, "RTC time read failed, consecutive=%" PRIu32,
                         s_rtc_time_failures);
@@ -50,6 +56,7 @@ static void read_rtc_to_snapshot(void)
                  s_rtc_time_failures);
         s_rtc_time_failures = 0U;
     }
+    app_fault_clear(APP_FAULT_P101_RTC);
 
     if (!s_rtc_time_logged || recovered) {
         ds3231_register_cache_t cache = {0};

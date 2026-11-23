@@ -7,7 +7,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 
-#define WS2812_GPIO GPIO_NUM_10
+#define WS2812_GPIO ((gpio_num_t)WS2812_DATA_GPIO)
 #define WS2812_SPI_SCLK_GPIO GPIO_NUM_11
 #define WS2812_SPI_HOST SPI2_HOST
 #define WS2812_SPI_HZ 2500000U

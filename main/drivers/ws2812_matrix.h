@@ -6,6 +6,8 @@
 #define MATRIX_WIDTH 16
 #define MATRIX_HEIGHT 16
 #define MATRIX_PIXELS 256
+/* 点阵数据线（DIN）所在 GPIO：复位阶段是高阻态，需尽早拉低，避免 WS2812 把浮空噪声当数据。 */
+#define WS2812_DATA_GPIO 10
 typedef struct { bool serpentine; bool mirror_x; bool mirror_y; uint8_t rotation; } matrix_mapping_t;
 typedef struct {
     bool grayscale;

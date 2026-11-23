@@ -11,6 +11,7 @@
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
 #include "esp_rom_sys.h"
+#include "esp_task_wdt.h"
 #include "esp_timer.h"
 
 #include "common/app_log.h"
@@ -57,6 +58,10 @@
 #define SECONDS_H 15
 #define DISPLAY_STATUS_LAMP_X 15
 #define DISPLAY_STATUS_LAMP_Y 15
+/* 故障灯组从最右 (15,15) 起向左延伸：灯1=Wi-Fi 故障，灯2=天气接口故障。 */
+#define DISPLAY_STATUS_LAMP_FAULT_SLOTS 2
+#define DISPLAY_STATUS_LAMP_FAULT_LAST_X \
+    (DISPLAY_STATUS_LAMP_X - (DISPLAY_STATUS_LAMP_FAULT_SLOTS - 1))
 
 #define MATRIX_BRIGHTNESS_HIGH 60
 #define MATRIX_BRIGHTNESS_LOW 20
@@ -125,6 +130,7 @@ static portMUX_TYPE s_health_lock = portMUX_INITIALIZER_UNLOCKED;
 static app_display_health_t s_display_health;
 static uint32_t s_next_animation_id;
 static bool s_recovery_requested;
+static bool s_force_render_once;
 static const char *TAG = "app_display";
 
 typedef enum {
@@ -298,15 +304,6 @@ static void draw_weather(const weather_snapshot_t *weather)
 
 static void draw_temperature(const weather_snapshot_t *weather)
 {
-    if (weather->network_error) {
-        for (uint8_t i = 0; i < 5; ++i) {
-            ws2812_matrix_set_pixel(TEMP_TENS_X + i, TEMP_Y + i,
-                                    DISPLAY_RED_R, DISPLAY_RED_G, DISPLAY_RED_B);
-            ws2812_matrix_set_pixel(TEMP_TENS_X + 4u - i, TEMP_Y + i,
-                                    DISPLAY_RED_R, DISPLAY_RED_G, DISPLAY_RED_B);
-        }
-        return;
-    }
     if (!weather->temperature_valid) return;
 
     int temperature = (int)(weather->temperature_c >= 0.0f ?
@@ -404,7 +401,15 @@ static void draw_status_lamp(void)
     }
 
     if (wifi_fault || weather_fault) {
-        red = DISPLAY_RED_R; green = DISPLAY_RED_G; blue = DISPLAY_RED_B;
+        /* 故障灯组：最右 (15,15) 起向左点亮红灯，每类故障一盏，便于区分故障来源。
+           Wi-Fi 故障 = 1 盏；Wi-Fi 正常但天气接口故障 = 2 盏。 */
+        const uint8_t lamp_count = wifi_fault ? 1U : 2U;
+        for (uint8_t i = 0; i < lamp_count; ++i) {
+            ws2812_matrix_set_pixel((uint8_t)(DISPLAY_STATUS_LAMP_X - i),
+                                    DISPLAY_STATUS_LAMP_Y,
+                                    DISPLAY_RED_R, DISPLAY_RED_G, DISPLAY_RED_B);
+        }
+        return;
     } else if (render_blink) {
         /* The temporary blink owns this frame; the next frame returns to the base state. */
     } else if (bluetooth_connected) {
@@ -689,8 +694,14 @@ static bool render_normal(TickType_t display_started, time_snapshot_t *out_snaps
 
     ws2812_frame_diagnostics_t diag = {0};
     ws2812_matrix_get_frame_diagnostics(&diag);
-    if (!diag.grayscale &&
-        !(diag.x == DISPLAY_STATUS_LAMP_X && diag.y == DISPLAY_STATUS_LAMP_Y)) {
+    const bool status_lamp_pixel =
+        diag.y == DISPLAY_STATUS_LAMP_Y &&
+        diag.x >= DISPLAY_STATUS_LAMP_FAULT_LAST_X &&
+        diag.x <= DISPLAY_STATUS_LAMP_X;
+    /* 健康任务请求恢复时强制显示一次，保证画面不会被诊断保护永久冻结。 */
+    const bool force_once = s_force_render_once;
+    s_force_render_once = false;
+    if (!diag.grayscale && !status_lamp_pixel && !force_once) {
         s_main_frame_sequence++;
         s_non_grayscale_total++;
         APP_LOGE(TAG,
@@ -707,7 +718,13 @@ static bool render_normal(TickType_t display_started, time_snapshot_t *out_snaps
         const TickType_t now = xTaskGetTickCount();
         if ((TickType_t)(now - s_last_main_force_refresh) >=
             pdMS_TO_TICKS(WS2812_KEEPALIVE_REFRESH_MS)) {
-            if (show_frame_force_with_retry() == ESP_OK) {
+            /* 续帧也双发：单次传输偶发位错误会被下一发立刻覆盖。 */
+            esp_err_t keepalive_err = show_frame_force_with_retry();
+            if (keepalive_err == ESP_OK) {
+                esp_rom_delay_us(WS2812_DUPLICATE_LATCH_US);
+                keepalive_err = show_frame_force_with_retry();
+            }
+            if (keepalive_err == ESP_OK) {
                 s_duplicate_refresh_total++;
                 s_last_main_force_refresh = now;
             } else {
@@ -804,9 +821,16 @@ static void flow_animation_finish(bool aborted)
                          summary_flags);
     s_animation.active = false;
     s_animation.abort_requested = false;
+    s_animation.current_frame = 0;
     s_last_output_main = false;
-    /* Always leave the animation with a complete, normal frame. */
+    /* 动画结束后必须交回一张正常主画面；未成功传输时记录事件供现场诊断。 */
     (void)render_normal(xTaskGetTickCount(), NULL);
+    if (!s_last_output_main) {
+        display_record_event(RUNTIME_EVENT_DISPLAY_ERROR,
+                             (int32_t)s_animation.attempted_frames,
+                             (int32_t)s_animation.max_refresh_ms,
+                             DISPLAY_ANIMATION_HANDOFF_FAILED);
+    }
 }
 
 static void flow_animation_step(void)
@@ -864,6 +888,7 @@ static void display_task(void *arg)
         const EventBits_t events =
             xEventGroupWaitBits(s_events, DISPLAY_ALL_EVENTS, pdTRUE, pdFALSE,
                                 wait_ticks);
+        (void)esp_task_wdt_reset();
         display_heartbeat();
         display_summary_if_due(xTaskGetTickCount());
 
@@ -871,7 +896,10 @@ static void display_task(void *arg)
         const bool recovery_requested = s_recovery_requested;
         s_recovery_requested = false;
         portEXIT_CRITICAL(&s_health_lock);
-        if (recovery_requested) s_animation.abort_requested = true;
+        if (recovery_requested) {
+            s_animation.abort_requested = true;
+            s_force_render_once = true;
+        }
 
         if (mode == DISPLAY_MODE_BOOT) {
             if ((events & DISPLAY_NETWORK_SUCCESS) != 0) {
@@ -956,6 +984,8 @@ esp_err_t app_display_init(bool network_expected)
                     &s_display_task_handle) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
+    /* 显示任务卡死时由任务看门狗触发重启，避免画面冻结后必须人工断电。 */
+    (void)esp_task_wdt_add(s_display_task_handle);
     portENTER_CRITICAL(&s_health_lock);
     s_display_health.last_progress_tick = xTaskGetTickCount();
     s_display_health.last_refresh_tick = s_display_health.last_progress_tick;

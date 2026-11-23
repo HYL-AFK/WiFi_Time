@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "nvs.h"
+#include "app_fault.h"
 #include "app_log.h"
 
 #define RUNTIME_EVENT_LOG_CAPACITY 32
@@ -167,11 +168,18 @@ static esp_err_t store_commit(const runtime_event_store_t *store)
 {
     nvs_handle_t handle;
     esp_err_t err = nvs_open(RUNTIME_EVENT_NVS_NAMESPACE, NVS_READWRITE, &handle);
-    if (err != ESP_OK) return err;
+    if (err == ESP_OK) {
+        err = nvs_set_blob(handle, RUNTIME_EVENT_NVS_KEY, store, sizeof(*store));
+        if (err == ESP_OK) err = nvs_commit(handle);
+        nvs_close(handle);
+    }
 
-    err = nvs_set_blob(handle, RUNTIME_EVENT_NVS_KEY, store, sizeof(*store));
-    if (err == ESP_OK) err = nvs_commit(handle);
-    nvs_close(handle);
+    /* 事件日志写失败会丢失现场证据，按等级 1 异常（P004）挂载。 */
+    if (err == ESP_OK) {
+        app_fault_clear(APP_FAULT_P004_STORAGE);
+    } else {
+        app_fault_raise(APP_FAULT_P004_STORAGE);
+    }
     return err;
 }
 

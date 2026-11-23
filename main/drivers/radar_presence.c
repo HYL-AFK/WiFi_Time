@@ -7,6 +7,7 @@
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "app_fault.h"
 #include "app_log.h"
 
 /* GPIO13 读取雷达 OUT；距离数据通过 UART1 的 GPIO1/GPIO2 获取。 */
@@ -21,6 +22,8 @@
 #define RADAR_DISTANCE_THRESHOLD_MM 500
 #define RADAR_MAX_FRAME_SIZE 128
 #define RADAR_SEND_STARTUP_CONFIG 0
+/* 连续无有效帧达到该秒数视为雷达异常，挂载等级 2 异常 P102。 */
+#define RADAR_FAULT_STALE_SECONDS 60U
 
 static const char *TAG = "radar_presence";
 static volatile radar_presence_state_t s_state = RADAR_PRESENCE_NONE;
@@ -34,6 +37,7 @@ static volatile uint32_t s_valid_frames;
 static volatile uint32_t s_invalid_frames;
 static volatile uint32_t s_header_drops;
 static bool s_raw_dumped;
+static uint32_t s_stale_seconds;
 
 #if RADAR_SEND_STARTUP_CONFIG
 static const uint8_t s_enable_config[] = {
@@ -267,9 +271,18 @@ static void radar_presence_task(void *arg)
                      valid_delta,
                      gpio_get_level(RADAR_PRESENCE_GPIO));
             if (valid_delta == 0U) {
+                if (s_stale_seconds < RADAR_FAULT_STALE_SECONDS) {
+                    s_stale_seconds++;
+                }
+                if (s_stale_seconds >= RADAR_FAULT_STALE_SECONDS) {
+                    app_fault_raise(APP_FAULT_P102_RADAR);
+                }
                 APP_LOGW(TAG,
                          "no valid radar frame: check power, GND, TX/RX direction, "
                          "GPIO1/GPIO2 and 256000 baud");
+            } else {
+                s_stale_seconds = 0;
+                app_fault_clear(APP_FAULT_P102_RADAR);
             }
             last_valid_frames = s_valid_frames;
             last_summary_tick = now;

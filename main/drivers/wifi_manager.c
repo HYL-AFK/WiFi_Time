@@ -15,13 +15,14 @@
 #include "freertos/task.h"
 
 #include "app_log.h"
+#include "common/device_name.h"
 #include "common/runtime_event_log.h"
 
 /*
  * Wi-Fi APSTA 管理模块。
  *
- * 启动后固定工作在 WIFI_MODE_APSTA：
- * - AP 侧：始终提供设备热点，默认 ESP32S3-SETUP / 12345678。
+ * 启动时使用 WIFI_MODE_APSTA，待 STA 获取 IP 后切换为 WIFI_MODE_STA：
+ * - AP 侧：仅在首次配网或连续连接失败时提供设备热点。
  * - STA 侧：根据 NVS 中保存的 Wi-Fi 列表，扫描环境并连接信号最强的可用 SSID。
  *
  * BLE 配网模块收到新配置后，只需要更新 app_config，再调用 wifi_manager_connect_sta()。
@@ -276,6 +277,26 @@ static uint32_t record_sta_connection_failure(const char *context, bool notify)
     return count;
 }
 
+/* AP 的启停统一由 Wi-Fi 工作任务执行，避免在系统事件回调中切换驱动模式。 */
+static esp_err_t set_softap_enabled(bool enabled)
+{
+    const wifi_mode_t mode = enabled ? WIFI_MODE_APSTA : WIFI_MODE_STA;
+    esp_err_t err = esp_wifi_set_mode(mode);
+    if (err != ESP_OK) {
+        APP_LOG_ERR(TAG, err, "set Wi-Fi mode=%s failed", enabled ? "APSTA" : "STA");
+        return err;
+    }
+    s_ap_started = enabled;
+    if (enabled) {
+        update_ap_ip_cache();
+        APP_LOGI(TAG, "SoftAP enabled for provisioning/recovery, ssid=%s", s_ap_name);
+    } else {
+        strlcpy(s_ap_ip_str, "0.0.0.0", sizeof(s_ap_ip_str));
+        APP_LOGI(TAG, "SoftAP disabled after STA obtained IP");
+    }
+    return ESP_OK;
+}
+
 static void wifi_event_work_task(void *arg)
 {
     (void)arg;
@@ -287,6 +308,11 @@ static void wifi_event_work_task(void *arg)
 
         switch (item.type) {
         case WIFI_WORK_GOT_IP:
+            if (s_ap_started) {
+                if (set_softap_enabled(false) != ESP_OK) {
+                    APP_LOGW(TAG, "STA is online but SoftAP could not be disabled");
+                }
+            }
             /* Publish the connected edge first so SNTP/location/weather start promptly. */
             notify_status_changed();
             runtime_event_log_append(RUNTIME_EVENT_WIFI_CONNECTED,
@@ -317,6 +343,11 @@ static void wifi_event_work_task(void *arg)
                 runtime_event_log_append(RUNTIME_EVENT_WIFI_FAILURE,
                                          (int32_t)failure_count,
                                          item.reason, 0);
+            }
+            if (item.count_failure && failure_count == 3U && !s_ap_started) {
+                if (set_softap_enabled(true) != ESP_OK) {
+                    APP_LOGW(TAG, "STA reached three failures but SoftAP recovery failed");
+                }
             }
             if (!item.count_failure) notify_status_changed();
             if (apply_pending_sta_config()) {
@@ -872,6 +903,16 @@ esp_err_t wifi_manager_init(const app_config_t *cfg)
         return ESP_ERR_NO_MEM;
     }
 
+    /* STA 主机名：路由器 DHCP 客户端列表里显示的名字，与蓝牙/热点名保持一致。
+       必须在 DHCP 启动前设置，否则本次连接仍会沿用旧的默认名称（espressif）。 */
+    const char *sta_hostname = device_name_get();
+    esp_err_t hostname_err = esp_netif_set_hostname(s_sta_netif, sta_hostname);
+    if (hostname_err == ESP_OK) {
+        APP_LOGI(TAG, "STA hostname=%s (router DHCP client list)", sta_hostname);
+    } else {
+        APP_LOG_ERR(TAG, hostname_err, "set STA hostname=%s failed", sta_hostname);
+    }
+
     wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
     err = esp_wifi_init(&wifi_cfg);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
@@ -917,6 +958,8 @@ esp_err_t wifi_manager_init(const app_config_t *cfg)
     }
 
     s_wifi_running = true;
+    /* 关闭省电模式：beacon 超时（reason=200）在省电模式下更容易发生。 */
+    (void)esp_wifi_set_ps(WIFI_PS_NONE);
     update_ap_ip_cache();
     s_inited = true;
     if (xTaskCreate(sta_connect_guard_task,

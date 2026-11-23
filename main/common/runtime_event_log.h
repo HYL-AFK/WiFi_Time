@@ -17,15 +17,19 @@ typedef enum {
 } runtime_event_type_t;
 
 /* Display diagnostics use value1/value2 for frame/count and duration/error. */
-#define DISPLAY_ANIMATION_BEGIN 1u
-#define DISPLAY_ANIMATION_COMPLETE 2u
-#define DISPLAY_ANIMATION_ABORT 3u
+/* 动画阶段占用互斥位标志，避免与自动置位的 TIME_VALID_FLAG(bit0) 撞位，
+   否则 ABORT(0x3) 与 COMPLETE|TIME_VALID(0x3) 在日志里无法区分。 */
+#define DISPLAY_ANIMATION_BEGIN (1u << 2)
+#define DISPLAY_ANIMATION_COMPLETE (1u << 3)
+#define DISPLAY_ANIMATION_ABORT (1u << 4)
+#define DISPLAY_ANIMATION_HANDOFF_FAILED (1u << 5)
 #define DISPLAY_REFRESH_TIMEOUT (1u << 8)
 #define DISPLAY_REFRESH_RETRY (1u << 9)
 #define DISPLAY_RMT_RECOVERY_SUCCESS (1u << 10)
 #define DISPLAY_RMT_RECOVERY_FAILURE (1u << 11)
 #define DISPLAY_HEALTH_STALLED (1u << 12)
 #define DISPLAY_SUMMARY (1u << 13)
+#define DISPLAY_FRAME_STALLED (1u << 14)
 #define DISPLAY_ANIMATION_SUCCESS_SHIFT 16
 #define DISPLAY_ANIMATION_MAX_REFRESH_SHIFT 24
 #define DISPLAY_DIAGNOSTIC_ANIMATION_ID_SHIFT 16

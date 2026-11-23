@@ -2,6 +2,7 @@
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include "esp_err.h"
 #include "esp_system.h"
 #include "nvs_flash.h"
@@ -9,6 +10,8 @@
 #include "freertos/task.h"
 #include "app_log.h"
 #include "app_config.h"
+#include "common/app_fault.h"
+#include "common/device_name.h"
 #include "common/runtime_event_log.h"
 #include "common/time_snapshot.h"
 #include "common/weather_snapshot.h"
@@ -19,7 +22,9 @@
 #include "app/app_health.h"
 #include "radar_presence.h"
 #include "wifi_manager.h"
+#include "ws2812_matrix.h"
 #include "ble_provision.h"
+#include "driver/gpio.h"
 
 static const char *TAG = "witime";
 static bool s_last_sta_connected;
@@ -79,12 +84,14 @@ static void wifi_changed(void)
     app_display_set_network_connected(connected);
     if (connected && !s_last_sta_connected) {
         app_display_set_wifi_fault(false);
+        app_fault_clear(APP_FAULT_P002_WIFI);
         app_display_show_network_success();
         app_time_notify_network();
     } else if (!connected &&
                failure_count == 3U &&
                s_last_sta_failure_count != failure_count) {
         app_display_set_wifi_fault(true);
+        app_fault_raise(APP_FAULT_P002_WIFI);
         app_display_show_network_failure();
     }
 
@@ -104,6 +111,11 @@ static void apply_wifi_cfg(const app_config_t *cfg)
 
 void app_main(void)
 {
+    /* 尽早接管点阵数据线：复位阶段 GPIO 处于高阻态，WS2812 会把浮空噪声当成数据而乱亮。
+       这里在系统初始化最前面把 DIN 拉低，把乱亮窗口压缩到最短（彻底解决需硬件下拉电阻）。 */
+    (void)gpio_set_direction((gpio_num_t)WS2812_DATA_GPIO, GPIO_MODE_OUTPUT);
+    (void)gpio_set_level((gpio_num_t)WS2812_DATA_GPIO, 0);
+
 #if WITIME_RADAR_STANDALONE_TEST
     esp_log_level_set("*", ESP_LOG_NONE);
     esp_log_level_set("radar_presence", ESP_LOG_INFO);
@@ -139,8 +151,16 @@ void app_main(void)
                                  0);
     }
 
+    err = app_fault_init();
+    if (err != ESP_OK) {
+        APP_LOG_ERR(TAG, err, "fault register init failed; continuing without fault tracking");
+    }
+
     app_config_t cfg;
     app_config_load(&cfg);
+    /* 统一命名：WiFi 热点名与蓝牙广播名一致（ESPARK_<MAC 后六位>）。 */
+    strlcpy(cfg.ap_name, device_name_get(), sizeof(cfg.ap_name));
+    cfg.has_ap_name = true;
 
     ESP_ERROR_CHECK(time_snapshot_init());
     ESP_ERROR_CHECK(weather_snapshot_init());
@@ -155,6 +175,7 @@ void app_main(void)
     err = radar_presence_init();
     if (err != ESP_OK) {
         APP_LOG_ERR(TAG, err, "radar presence init failed; continuing without sensor");
+        app_fault_raise(APP_FAULT_P102_RADAR);
     }
     radar_presence_set_callback(radar_changed);
  #else

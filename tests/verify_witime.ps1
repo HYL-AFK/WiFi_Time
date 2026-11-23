@@ -49,6 +49,8 @@ $required = @(
     'main/APP/app_rtc.c', 'main/APP/app_time.c',
     'main/APP/app_weather.c', 'main/APP/app_display.c',
     'main/common/location_snapshot.c', 'main/common/location_snapshot.h',
+    'main/common/app_fault.c', 'main/common/app_fault.h',
+    'main/common/device_name.c', 'main/common/device_name.h',
     'D:\Project\WiTime_Hardware\witime_design.drawio'
 )
 foreach ($path in $required) { Assert-True (Test-Path $path) "missing $path" }
@@ -71,6 +73,12 @@ $sdkconfig = Get-Content -Raw sdkconfig
 $sdkconfigDefaults = Get-Content -Raw sdkconfig.defaults
 $blufiSecuritySource = Get-Content -Raw main/middle/blufi_security.c
 $mainCmake = Get-Content -Raw main/CMakeLists.txt
+$faultSource = Get-Content -Raw main/common/app_fault.c
+$faultHeader = Get-Content -Raw main/common/app_fault.h
+$deviceNameSource = Get-Content -Raw main/common/device_name.c
+$healthSource = Get-Content -Raw main/APP/app_health.c
+$eventLogSource = Get-Content -Raw main/common/runtime_event_log.c
+$radarSource = Get-Content -Raw main/drivers/radar_presence.c
 $mainSource = Get-Content -Raw main/main.c
 $timeSnapshotHeader = Get-Content -Raw main/common/time_snapshot.h
 $ds3231Source = Get-Content -Raw main/drivers/ds3231.c
@@ -133,11 +141,44 @@ Assert-True (-not $configHeader.Contains('app_config_save_location_cache') -and
              -not $configHeader.Contains('app_config_clear_location_cache')) "location cache persistence APIs must be removed"
 Assert-True ($configSource.Contains('erase_legacy_location_keys')) "firmware upgrades must erase legacy location cache keys"
 Assert-True (-not $timeSource.Contains('app_config_save_location_cache') -and
-             -not $timeSource.Contains('has_cached_location')) "time service must not read or persist location in NVS"
+             -not $timeSource.Contains('has_cached_location')) "time service must not read or persist an automatic location cache in NVS"
 Assert-True ($timeSource.Contains('https://ipwho.is/')) "time task must use the primary IP geolocation API"
 Assert-True ($timeSource.Contains('https://ipapi.co/json/')) "time task must retain a fallback geolocation API"
 Assert-True (-not $timeSource.Contains('https://ipapi.co/timezone/')) "time task must not use the timezone-only API"
+Assert-True ($configHeader.Contains('has_fixed_location') -and
+             $configHeader.Contains('fixed_latitude') -and
+             $configHeader.Contains('fixed_longitude')) "user-configured fixed location fields are missing"
+Assert-True ($configSource.Contains('"fix_loc"')) "fixed location NVS key is missing"
+Assert-True ($timeSource.Contains('apply_configured_fixed_location') -and
+             $timeSource.Contains('app_time_apply_fixed_location')) "fixed location must be applied before IP geolocation"
+Assert-True ($bleProvisionSource.Contains('loc=') -and
+             $bleProvisionSource.Contains('blufi_handle_location_command')) "BluFi custom data must configure a fixed location"
 Assert-True ($timeSource.Contains('esp_http_client_set_header') -and $timeSource.Contains('User-Agent')) "location requests must identify the firmware client"
+Assert-True ($faultHeader.Contains('APP_FAULT_P001_WEATHER') -and
+             $faultHeader.Contains('APP_FAULT_P002_WIFI') -and
+             $faultHeader.Contains('APP_FAULT_P003_DISPLAY') -and
+             $faultHeader.Contains('APP_FAULT_P004_STORAGE') -and
+             $faultHeader.Contains('APP_FAULT_P101_RTC') -and
+             $faultHeader.Contains('APP_FAULT_P102_RADAR') -and
+             $faultHeader.Contains('APP_FAULT_P103_LOCATION') -and
+             $faultHeader.Contains('APP_FAULT_P104_LOW_BATTERY')) "fault register must define P-coded level 1 and level 2 codes"
+Assert-True ($faultSource.Contains('s_self_heal_min') -and
+             $faultSource.Contains('10U,  /* P003') -and
+             $faultSource.Contains('30U,  /* P002') -and
+             $faultSource.Contains('60U,  /* P001') -and
+             $faultSource.Contains('120U, /* P004')) "self-heal limits must be tiered per code (10m/30m/1h/2h)"
+Assert-True (-not $faultSource.Contains('APP_FAULT_LEVEL1_AUTO_REBOOT_MS')) "level 1 must not share a single four-hour timeout"
+Assert-True ($faultSource.Contains('esp_restart()')) "level 1 fault recovery must reboot the device"
+Assert-True ($faultSource.Contains('"app_fault"') -and $faultSource.Contains('nvs_set_blob')) "fault register must persist to NVS"
+Assert-True ($mainCmake.Contains('common/app_fault.c')) "fault register source must be built"
+Assert-True ($mainSource.Contains('app_fault_init') -and $mainSource.Contains('APP_FAULT_P002_WIFI')) "wi-fi failures must use the fault register"
+Assert-True ($weatherSource.Contains('APP_FAULT_P001_WEATHER')) "weather failures must use the fault register"
+Assert-True ($healthSource.Contains('APP_FAULT_P003_DISPLAY') -and
+             $healthSource.Contains('app_fault_check_auto_reboot')) "health task must drive display faults and level 1 auto reboot"
+Assert-True ($eventLogSource.Contains('APP_FAULT_P004_STORAGE')) "event log write failures must use the fault register"
+Assert-True ($rtcSource.Contains('APP_FAULT_P101_RTC')) "RTC failures must use the fault register"
+Assert-True ($radarSource.Contains('APP_FAULT_P102_RADAR')) "radar faults must use the fault register"
+Assert-True ($timeSource.Contains('APP_FAULT_P103_LOCATION')) "abroad geolocation must use the fault register"
 Assert-True ($timeSource.Contains('cJSON_GetObjectItem') -and $timeSource.Contains('latitude') -and $timeSource.Contains('longitude')) "time task must parse geolocation coordinates"
 Assert-True ($timeSource.Contains('timezone') -and $timeSource.Contains('id')) "time task must parse nested and flat timezone responses"
 Assert-True ($timeSource.Contains('HTTP %d')) "location HTTP status failures must be logged"
@@ -248,11 +289,12 @@ Assert-True ($ds3231Source.Contains('DS3231_TEMP_REG 0x11')) "missing DS3231 tem
 Assert-True ($ds3231Source.Contains('temperature_regs[1] >> 6')) "missing DS3231 temperature fractional decode"
 Assert-True ($weatherSnapshotHeader.Contains('temperature_valid')) "weather snapshot must separate temperature validity"
 Assert-True ($weatherSnapshotHeader.Contains('temperature_source')) "weather snapshot must track temperature source"
-Assert-True ($weatherSnapshotHeader.Contains('network_error')) "weather snapshot must distinguish a failed scheduled refresh from RTC fallback"
-Assert-True ($weatherSnapshotSource.Contains('network_error') -and
-             $weatherSnapshotSource.Contains('!s_value.network_error')) "RTC temperature fallback must stop after a published weather failure"
-Assert-True ($displaySource.Contains('weather->network_error') -and
-             $displaySource.Contains('DISPLAY_RED_R')) "weather failure must render a red temperature cross"
+Assert-True ($weatherSnapshotSource.Contains('s_value.temperature_source != WEATHER_TEMP_SOURCE_NETWORK')) "RTC temperature fallback must stop after the first network temperature"
+$publishWeather = [regex]::Match($weatherSource, '(?s)static void publish_pending_weather\(void\).*?\n\}')
+Assert-True ($publishWeather.Success -and
+             $publishWeather.Value.Contains('app_display_set_weather_fault(true)') -and
+             ([regex]::Matches($publishWeather.Value, 'weather_snapshot_set\(').Count -eq 1)) "weather failure must keep the last snapshot and only light the fault lamp"
+Assert-True (-not $displaySource.Contains('weather->network_error')) "temperature area must not render a network-error cross"
 Assert-True ($weatherSnapshotSource.Contains('weather_snapshot_set_rtc_temperature_q4')) "missing RTC temperature snapshot setter"
 Assert-True ($rtcSource.Contains('s_rtc_temperature_loaded')) "RTC task must retry temperature until first success"
 Assert-True ($rtcSource.Contains('ds3231_read_temperature_q4')) "RTC task must read DS3231 temperature"
@@ -514,6 +556,8 @@ Assert-True ($displaySource.Contains('diag.grayscale') -and
              $displaySource.Contains('diag.crc32')) "main frame diagnostics must log color, index and CRC"
 Assert-True ($displaySource.Contains('WS2812_DIAGNOSTIC_INTERVAL 60')) "WS2812 diagnostics summary interval must be 60 changed frames"
 Assert-True ($displaySource.Contains('WS2812_KEEPALIVE_REFRESH_MS 250')) "validated main frames must be reasserted every 250 ms"
+Assert-True ($sdkconfig.Contains('CONFIG_SPI_MASTER_IN_IRAM=y') -and
+             $sdkconfigDefaults.Contains('CONFIG_SPI_MASTER_IN_IRAM=y')) "SPI master driver must stay in IRAM so flash writes cannot stall ledger refreshes"
 Assert-True ($displaySource.Contains('drop non-grayscale main frame') -and
              $displaySource.Contains('!diag.grayscale &&') -and
              $displaySource.Contains('DISPLAY_STATUS_LAMP_X')) "non-grayscale main frames must be dropped except for the status lamp"
@@ -564,11 +608,16 @@ Assert-True ($mainCmake.Contains('esp_driver_spi') -and -not $mainCmake.Contains
 Assert-True ($sdkconfig.Contains('CONFIG_BT_ENABLED=y')) "Bluetooth must be enabled for BluFi"
 Assert-True ($sdkconfig.Contains('CONFIG_BT_NIMBLE_ENABLED=y')) "NimBLE must be enabled for BluFi"
 Assert-True ($sdkconfig.Contains('CONFIG_BT_NIMBLE_BLUFI_ENABLE=y')) "NimBLE BluFi must be enabled"
-Assert-True ($bleProvisionSource.Contains('esp_read_mac(mac, ESP_MAC_BT)') -and
-             $bleProvisionSource.Contains('"%s-%02X%02X%02X"') -and
-             $bleProvisionSource.Contains('mac[3], mac[4], mac[5]')) "BLE advertising name must append the Bluetooth MAC address suffix"
-Assert-True ($bleProvisionSource.Contains('#define BLE_FIXED_ADV_NAME "ESPARK"') -and
-             -not $bleProvisionSource.Contains('PowerGo')) "BLE advertising name must use the ESPARK prefix without PowerGo"
+Assert-True ($bleProvisionSource.Contains('make_adv_name') -and
+             $bleProvisionSource.Contains('device_name_get')) "BLE advertising name must use the unified device name"
+Assert-True ($deviceNameSource.Contains('DEVICE_NAME_PREFIX "ESPARK"') -and
+             -not $bleProvisionSource.Contains('PowerGo')) "device name prefix must be ESPARK without PowerGo"
+Assert-True ($deviceNameSource.Contains('ESP_MAC_WIFI_STA') -and
+             $deviceNameSource.Contains('%s_%02X%02X%02X')) "device name must append the last six WiFi STA MAC digits"
+Assert-True ($bleProvisionSource.Contains('device_name_get') -and
+             $mainSource.Contains('device_name_get')) "BLE advertising name and SoftAP name must share the unified device name"
+Assert-True ($wifiSource.Contains('esp_netif_set_hostname') -and
+             $wifiSource.Contains('device_name_get')) "STA hostname must use the unified device name for router DHCP client lists"
 Assert-True ($bleProvisionSource.Contains('ble_gap_adv_rsp_set_fields(&scan_rsp)') -and
              $bleProvisionSource.Contains('scan_rsp.name = (uint8_t *)s_adv_name') -and
              $bleProvisionSource.Contains('ble_gap_adv_start(s_own_addr_type')) "BLE advertising name must use the scan response when it exceeds the advertising payload"
@@ -685,6 +734,11 @@ Assert-True ($mainSource.Contains('const bool connected = wifi_manager_is_sta_co
 Assert-True ($wifiSource.Contains('wifi_event_work_task') -and
              $wifiSource.Contains('WIFI_WORK_GOT_IP') -and
              $wifiSource.Contains('xQueueSend')) "Wi-Fi event handling must defer heavy work to a background task"
+Assert-True ($wifiSource.Contains('WIFI_MODE_STA') -and
+             $wifiSource.Contains('WIFI_MODE_APSTA')) "Wi-Fi manager must support STA-only and APSTA modes"
+Assert-True ($wifiSource.Contains('set_softap_enabled') -and
+             $wifiSource.Contains('SoftAP disabled after STA obtained IP') -and
+             $wifiSource.Contains('failure_count == 3U')) "SoftAP lifecycle must close after IP and recover after three failures"
  $wifiHandler = [regex]::Match($wifiSource, '(?s)static void wifi_event_handler\(.*?\n\}')
 Assert-True ($wifiHandler.Success -and
              -not $wifiHandler.Value.Contains('runtime_event_log_append') -and

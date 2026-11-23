@@ -7,7 +7,9 @@
 
 #include "app_log.h"
 #include "app_display.h"
+#include "app/app_time.h"
 #include "blufi_security.h"
+#include "common/device_name.h"
 #include "esp_blufi.h"
 #include "esp_blufi_api.h"
 #include "esp_bt.h"
@@ -27,8 +29,8 @@ static const char *TAG = "ble_provision";
 
 void ble_store_config_init(void);
 
-#define BLE_FIXED_ADV_NAME "ESPARK"
 #define BLUFI_SCAN_LIST_MAX_AP 20
+#define BLUFI_CUSTOM_DATA_MAX 64
 
 static app_config_t s_cfg;
 static ble_cfg_apply_cb_t s_apply_cb;
@@ -95,11 +97,8 @@ static void blufi_host_task(void *param)
 
 static void make_adv_name(void)
 {
-    uint8_t mac[6];
-
-    ESP_ERROR_CHECK(esp_read_mac(mac, ESP_MAC_BT));
-    snprintf(s_adv_name, sizeof(s_adv_name), "%s-%02X%02X%02X",
-             BLE_FIXED_ADV_NAME, mac[3], mac[4], mac[5]);
+    /* 蓝牙广播名与 WiFi 热点名统一为 <主机名>_<MAC 后六位>（如 ESPARK_EA01D8）。 */
+    strlcpy(s_adv_name, device_name_get(), sizeof(s_adv_name));
 }
 
 static void blufi_start_advertising(void);
@@ -414,6 +413,55 @@ static void blufi_apply_pending_sta_config(void)
     blufi_send_wifi_report();
 }
 
+/* BluFi 自定义数据通道用于固定定位配置：
+ * - loc=<纬度>,<经度>：保存并立即应用固定坐标（优先于 IP 定位）；
+ * - loc=auto：清除固定坐标，恢复 IP 定位。 */
+static void blufi_handle_location_command(const uint8_t *data, uint32_t len)
+{
+    char text[BLUFI_CUSTOM_DATA_MAX + 1];
+    if (data == NULL || len == 0 || len > BLUFI_CUSTOM_DATA_MAX) {
+        APP_LOGW(TAG, "BluFi custom data length invalid: %" PRIu32, len);
+        return;
+    }
+
+    memcpy(text, data, len);
+    text[len] = '\0';
+
+    if (strcmp(text, "loc=auto") == 0) {
+        s_cfg.has_fixed_location = false;
+        if (app_config_save(&s_cfg) != ESP_OK) {
+            APP_LOGW(TAG, "clear fixed location failed");
+            return;
+        }
+        APP_LOGI(TAG, "fixed location cleared; back to IP geolocation");
+        return;
+    }
+
+    double latitude = 0.0;
+    double longitude = 0.0;
+    if (strncmp(text, "loc=", 4) != 0 ||
+        sscanf(text + 4, "%lf,%lf", &latitude, &longitude) != 2 ||
+        latitude < -90.0 || latitude > 90.0 ||
+        longitude < -180.0 || longitude > 180.0) {
+        APP_LOGW(TAG, "unknown BluFi custom data: %s", text);
+        return;
+    }
+
+    s_cfg.fixed_latitude = latitude;
+    s_cfg.fixed_longitude = longitude;
+    s_cfg.has_fixed_location = true;
+    if (app_config_save(&s_cfg) != ESP_OK) {
+        APP_LOGW(TAG, "save fixed location failed");
+        return;
+    }
+    if (app_time_apply_fixed_location(latitude, longitude) != ESP_OK) {
+        APP_LOGW(TAG, "apply fixed location failed");
+        return;
+    }
+    APP_LOGI(TAG, "fixed location configured: latitude=%.6f longitude=%.6f",
+             latitude, longitude);
+}
+
 static void blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_t *param)
 {
     switch (event) {
@@ -574,6 +622,8 @@ static void blufi_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_param_
 
     case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA:
         APP_LOGI(TAG, "BluFi custom data len=%" PRIu32, param->custom_data.data_len);
+        blufi_handle_location_command(param->custom_data.data,
+                                      param->custom_data.data_len);
         break;
 
     default:
