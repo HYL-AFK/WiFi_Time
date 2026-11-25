@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>WiTime × 小智 接入草图</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #FCF8EC; }
+  svg { display: block; }
+  text { font-family: "KaiTi", "楷体", "STKaiti", "Segoe Print", serif; fill: #26221C; }
+</style>
+</head>
+<body>
+<svg width="1720" height="1130" viewBox="0 0 1720 1130" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <filter id="sketch" x="-5%" y="-5%" width="110%" height="110%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.018" numOctaves="3" seed="7" result="n"/>
+      <feDisplacementMap in="SourceGraphic" in2="n" scale="2.6" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+    <pattern id="dots" width="26" height="26" patternUnits="userSpaceOnUse">
+      <circle cx="1.4" cy="1.4" r="1.2" fill="#E7DFCB"/>
+    </pattern>
+    <marker id="arrowInk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10" fill="none" stroke="#26221C" stroke-width="1.8" stroke-linecap="round"/>
+    </marker>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10" fill="none" stroke="#1D4ED8" stroke-width="1.8" stroke-linecap="round"/>
+    </marker>
+    <marker id="arrowAmber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10" fill="none" stroke="#C2410C" stroke-width="1.8" stroke-linecap="round"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10" fill="none" stroke="#15803D" stroke-width="1.8" stroke-linecap="round"/>
+    </marker>
+  </defs>
+
+  <!-- 纸张 -->
+  <rect x="0" y="0" width="1720" height="1130" fill="#FCF8EC"/>
+  <rect x="0" y="0" width="1720" height="1130" fill="url(#dots)"/>
+
+  <!-- 标题 -->
+  <text x="58" y="92" font-size="46" font-weight="bold">WiTime × 小智 接入草图</text>
+  <text x="60" y="130" font-size="19" fill="#6E6659">ESP32-S3（无 PSRAM）· 16×16 WS2812 点阵 · 原有钟表业务不动</text>
+  <g filter="url(#sketch)">
+    <path d="M58,104 q120,8 240,-2 t250,4" fill="none" stroke="#C2410C" stroke-width="3" stroke-linecap="round" opacity="0.55"/>
+  </g>
+
+  <!-- 图例 -->
+  <g filter="url(#sketch)">
+    <rect x="1150" y="62" width="26" height="26" rx="5" fill="#EAF1FF" stroke="#1D4ED8" stroke-width="2"/>
+    <rect x="1310" y="62" width="26" height="26" rx="5" fill="#FFF4E3" stroke="#C2410C" stroke-width="2"/>
+    <rect x="1490" y="62" width="26" height="26" rx="5" fill="#EDF8F0" stroke="#15803D" stroke-width="2"/>
+  </g>
+  <text x="1188" y="83" font-size="19">本期 p1</text>
+  <text x="1348" y="83" font-size="19">后续 p2 / p3</text>
+  <text x="1528" y="83" font-size="19">现有保留</text>
+
+  <!-- ================= 外部 / 云端 ================= -->
+  <text x="44" y="180" font-size="20" fill="#6E6659">外部</text>
+
+  <g filter="url(#sketch)">
+    <rect x="40" y="230" width="350" height="150" rx="12" fill="#EAF1FF" stroke="#1D4ED8" stroke-width="2.4"/>
+    <rect x="40" y="430" width="350" height="112" rx="12" fill="#EDF8F0" stroke="#15803D" stroke-width="2.2"/>
+    <rect x="40" y="590" width="350" height="112" rx="12" fill="#F4F1E8" stroke="#7A7266" stroke-width="2.2"/>
+  </g>
+  <text x="62" y="272" font-size="25" font-weight="bold" fill="#1D4ED8">小智服务端</text>
+  <text x="62" y="306" font-size="18">WSS 443 · 长连接</text>
+  <text x="62" y="334" font-size="18">激活 · ASR / LLM / TTS</text>
+  <text x="62" y="362" font-size="18">MCP 工具 · OTA</text>
+
+  <text x="62" y="470" font-size="23" font-weight="bold" fill="#15803D">天气 / 时间</text>
+  <text x="62" y="502" font-size="18">Open-Meteo · SNTP</text>
+  <text x="62" y="528" font-size="18">IP 定位 / 固定坐标</text>
+
+  <text x="62" y="630" font-size="23" font-weight="bold">手机 BluFi App</text>
+  <text x="62" y="662" font-size="18">配 Wi-Fi · 写 loc= 坐标</text>
+  <text x="62" y="688" font-size="18">（复用现有通道）</text>
+
+  <!-- ================= 设备固件框 ================= -->
+  <g filter="url(#sketch)">
+    <rect x="560" y="190" width="700" height="700" rx="16" fill="#FFFDF6" stroke="#26221C" stroke-width="3"/>
+  </g>
+  <text x="584" y="228" font-size="27" font-weight="bold">WiTime 固件（ESP32-S3）</text>
+  <text x="1236" y="226" font-size="15" text-anchor="end" fill="#C2410C">注意：无 PSRAM，音频缓冲要省着用</text>
+
+  <!-- 行 1 -->
+  <g filter="url(#sketch)">
+    <rect x="584" y="248" width="652" height="80" rx="10" fill="#EAF1FF" stroke="#1D4ED8" stroke-width="2.2"/>
+    <rect x="584" y="248" width="8" height="80" rx="4" fill="#1D4ED8"/>
+    <rect x="1150" y="274" width="64" height="28" rx="14" fill="#FFFFFF" stroke="#1D4ED8" stroke-width="1.6"/>
+  </g>
+  <text x="610" y="278" font-size="21" font-weight="bold">接入层 · 小智 Protocol</text>
+  <text x="610" y="308" font-size="17.5" fill="#4B453C">握手 hello / 激活码 / listen 状态 / 音频帧</text>
+  <text x="1182" y="294" font-size="16" text-anchor="middle" fill="#1D4ED8">p1</text>
+
+  <!-- 行 2 -->
+  <g filter="url(#sketch)">
+    <rect x="584" y="342" width="652" height="80" rx="10" fill="#EAF1FF" stroke="#1D4ED8" stroke-width="2.2"/>
+    <rect x="584" y="342" width="8" height="80" rx="4" fill="#1D4ED8"/>
+    <rect x="1150" y="368" width="64" height="28" rx="14" fill="#FFFFFF" stroke="#1D4ED8" stroke-width="1.6"/>
+  </g>
+  <text x="610" y="372" font-size="21" font-weight="bold">会话层 · Application</text>
+  <text x="610" y="402" font-size="17.5" fill="#4B453C">idle · listening · speaking · MCP 工具</text>
+  <text x="1182" y="388" font-size="16" text-anchor="middle" fill="#1D4ED8">p1</text>
+
+  <!-- 行 3 -->
+  <g filter="url(#sketch)">
+    <rect x="584" y="436" width="652" height="80" rx="10" fill="#FFF4E3" stroke="#C2410C" stroke-width="2.2"/>
+    <rect x="584" y="436" width="8" height="80" rx="4" fill="#C2410C"/>
+    <rect x="1150" y="462" width="64" height="28" rx="14" fill="#FFFFFF" stroke="#C2410C" stroke-width="1.6"/>
+  </g>
+  <text x="610" y="466" font-size="21" font-weight="bold">音频层 · AudioService</text>
+  <text x="610" y="496" font-size="17.5" fill="#4B453C">AFE 唤醒词 · AEC · Opus 编解码 · I2S</text>
+  <text x="1182" y="482" font-size="16" text-anchor="middle" fill="#C2410C">p2</text>
+
+  <!-- 行 4 -->
+  <g filter="url(#sketch)">
+    <rect x="584" y="530" width="652" height="80" rx="10" fill="#FFF4E3" stroke="#C2410C" stroke-width="2.2"/>
+    <rect x="584" y="530" width="8" height="80" rx="4" fill="#C2410C"/>
+    <rect x="1150" y="556" width="64" height="28" rx="14" fill="#FFFFFF" stroke="#C2410C" stroke-width="1.6"/>
+  </g>
+  <text x="610" y="560" font-size="21" font-weight="bold">显示层 · app_display</text>
+  <text x="610" y="590" font-size="17.5" fill="#4B453C">时钟主界面 + 会话状态图标（听 / 想 / 说）</text>
+  <text x="1182" y="576" font-size="16" text-anchor="middle" fill="#C2410C">p3</text>
+
+  <!-- 分隔线 -->
+  <g filter="url(#sketch)">
+    <path d="M584,632 H820 M900,632 H1236" fill="none" stroke="#B9B09E" stroke-width="1.6" stroke-dasharray="7 7"/>
+  </g>
+  <rect x="822" y="618" width="76" height="26" fill="#FFFDF6"/>
+  <text x="860" y="638" font-size="15" text-anchor="middle" fill="#8A8172">原有业务</text>
+
+  <!-- 行 5 -->
+  <g filter="url(#sketch)">
+    <rect x="584" y="654" width="652" height="80" rx="10" fill="#EDF8F0" stroke="#15803D" stroke-width="2.2"/>
+    <rect x="584" y="654" width="8" height="80" rx="4" fill="#15803D"/>
+    <rect x="1150" y="680" width="64" height="28" rx="14" fill="#FFFFFF" stroke="#15803D" stroke-width="1.6"/>
+  </g>
+  <text x="610" y="684" font-size="21" font-weight="bold">业务层 · 钟表逻辑</text>
+  <text x="610" y="714" font-size="17.5" fill="#4B453C">SNTP 校时 + 回写 DS3231 · 天气 · P 码自愈</text>
+  <text x="1182" y="700" font-size="15" text-anchor="middle" fill="#15803D">保留</text>
+
+  <!-- 行 6 -->
+  <g filter="url(#sketch)">
+    <rect x="584" y="748" width="652" height="80" rx="10" fill="#EDF8F0" stroke="#15803D" stroke-width="2.2"/>
+    <rect x="584" y="748" width="8" height="80" rx="4" fill="#15803D"/>
+    <rect x="1150" y="774" width="64" height="28" rx="14" fill="#FFFFFF" stroke="#15803D" stroke-width="1.6"/>
+  </g>
+  <text x="610" y="778" font-size="21" font-weight="bold">平台层 · 网络 / 配置</text>
+  <text x="610" y="808" font-size="17.5" fill="#4B453C">wifi_manager · BluFi · app_config / NVS</text>
+  <text x="1182" y="794" font-size="15" text-anchor="middle" fill="#15803D">复用</text>
+
+  <!-- ================= 外设 ================= -->
+  <text x="1312" y="180" font-size="20" fill="#6E6659">外设</text>
+
+  <g filter="url(#sketch)">
+    <rect x="1310" y="342" width="330" height="80" rx="10" fill="#FFFFFF" stroke="#7A7266" stroke-width="2" stroke-dasharray="8 6"/>
+    <rect x="1310" y="436" width="330" height="80" rx="10" fill="#FFFFFF" stroke="#C2410C" stroke-width="2" stroke-dasharray="8 6"/>
+    <rect x="1310" y="530" width="330" height="80" rx="10" fill="#FFFFFF" stroke="#26221C" stroke-width="2"/>
+    <rect x="1310" y="654" width="330" height="80" rx="10" fill="#FFFFFF" stroke="#15803D" stroke-width="2"/>
+  </g>
+  <text x="1332" y="372" font-size="20" font-weight="bold">按键 BOOT / GPIO0</text>
+  <text x="1332" y="402" font-size="16.5" fill="#6E6659">唤醒 · 打断（可选）</text>
+
+  <text x="1332" y="466" font-size="20" font-weight="bold">麦克风 + 喇叭</text>
+  <text x="1332" y="496" font-size="16.5" fill="#C2410C">I2S · p2 待接线</text>
+
+  <text x="1332" y="560" font-size="20" font-weight="bold">WS2812 16×16 点阵</text>
+  <text x="1332" y="590" font-size="16.5" fill="#6E6659">GPIO10 · SPI-DMA</text>
+
+  <text x="1332" y="684" font-size="20" font-weight="bold">DS3231 RTC</text>
+  <text x="1332" y="714" font-size="16.5" fill="#6E6659">I2C · GPIO8 / GPIO9</text>
+
+  <!-- ================= 连线 ================= -->
+  <!-- 小智服务端 -> 接入层 -->
+  <g filter="url(#sketch)">
+    <path d="M396,300 Q470,300 520,296 T574,291" fill="none" stroke="#1D4ED8" stroke-width="2.6" marker-end="url(#arrowBlue)"/>
+  </g>
+  <text x="430" y="284" font-size="16" fill="#1D4ED8">WSS</text>
+
+  <!-- 天气 / 时间 -> 业务层 -->
+  <g filter="url(#sketch)">
+    <path d="M396,486 H448 Q458,486 458,498 V680 Q458,694 472,694 H550 Q560,694 560,697 L576,699" fill="none" stroke="#15803D" stroke-width="2.2" stroke-dasharray="8 6" marker-end="url(#arrowGreen)"/>
+  </g>
+  <text x="398" y="472" font-size="14" fill="#15803D">HTTPS</text>
+
+  <!-- BluFi App -> 平台层 -->
+  <g filter="url(#sketch)">
+    <path d="M396,646 H418 Q428,646 428,658 V788 Q428,800 440,800 L576,801" fill="none" stroke="#7A7266" stroke-width="2.2" stroke-dasharray="8 6" marker-end="url(#arrowInk)"/>
+  </g>
+  <text x="396" y="628" font-size="14" fill="#7A7266">BLE</text>
+
+  <!-- 会话层 -> 按键 -->
+  <g filter="url(#sketch)">
+    <path d="M1266,382 H1298" fill="none" stroke="#26221C" stroke-width="2" marker-end="url(#arrowInk)"/>
+  </g>
+
+  <!-- 音频层 -> 麦克风喇叭 -->
+  <g filter="url(#sketch)">
+    <path d="M1266,476 H1298" fill="none" stroke="#C2410C" stroke-width="2.2" stroke-dasharray="8 6" marker-end="url(#arrowAmber)"/>
+  </g>
+
+  <!-- 显示层 -> 点阵 -->
+  <g filter="url(#sketch)">
+    <path d="M1266,570 H1298" fill="none" stroke="#26221C" stroke-width="2" marker-end="url(#arrowInk)"/>
+  </g>
+
+  <!-- 业务层 -> DS3231 -->
+  <g filter="url(#sketch)">
+    <path d="M1266,694 H1298" fill="none" stroke="#15803D" stroke-width="2.2" marker-end="url(#arrowGreen)"/>
+  </g>
+
+  <!-- ================= 底部主线 ================= -->
+  <g filter="url(#sketch)">
+    <path d="M60,920 H1640" fill="none" stroke="#B9B09E" stroke-width="1.8" stroke-dasharray="10 8"/>
+  </g>
+  <text x="60" y="966" font-size="21" font-weight="bold" fill="#C2410C">p1 主线：先把 WSS 和激活跑通，音频硬件没到之前先不接声音</text>
+
+  <g filter="url(#sketch)">
+    <rect x="60" y="990" width="280" height="64" rx="10" fill="#FFFDF6" stroke="#1D4ED8" stroke-width="2"/>
+    <rect x="380" y="990" width="280" height="64" rx="10" fill="#FFFDF6" stroke="#1D4ED8" stroke-width="2"/>
+    <rect x="700" y="990" width="280" height="64" rx="10" fill="#FFFDF6" stroke="#1D4ED8" stroke-width="2"/>
+    <rect x="1020" y="990" width="280" height="64" rx="10" fill="#FFFDF6" stroke="#C2410C" stroke-width="2"/>
+    <rect x="1340" y="990" width="280" height="64" rx="10" fill="#FFFDF6" stroke="#C2410C" stroke-width="2"/>
+
+    <path d="M344,1022 H372" fill="none" stroke="#26221C" stroke-width="2" marker-end="url(#arrowInk)"/>
+    <path d="M664,1022 H692" fill="none" stroke="#26221C" stroke-width="2" marker-end="url(#arrowInk)"/>
+    <path d="M984,1022 H1012" fill="none" stroke="#26221C" stroke-width="2" marker-end="url(#arrowInk)"/>
+    <path d="M1304,1022 H1332" fill="none" stroke="#26221C" stroke-width="2" marker-end="url(#arrowInk)"/>
+  </g>
+
+  <text x="200" y="1030" font-size="18" text-anchor="middle">上电 → 连上 Wi-Fi</text>
+  <text x="520" y="1030" font-size="18" text-anchor="middle">WSS 握手 · 取激活码</text>
+  <text x="840" y="1030" font-size="18" text-anchor="middle">激活成功 · 进入 idle</text>
+  <text x="1160" y="1030" font-size="18" text-anchor="middle">listen 状态收发（先无声）</text>
+  <text x="1480" y="1030" font-size="18" text-anchor="middle">点阵同步会话状态</text>
+
+  <text x="60" y="1096" font-size="16" fill="#8A8172">草图只表达分层与连线关系，不代表任务优先级；音频（p2）与点阵状态（p3）在 p1 链路跑通后再接。</text>
+</svg>
+</body>
+</html>

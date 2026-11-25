@@ -7,8 +7,9 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 
+/* SPI 驱动只需要 MOSI 真正接到灯带，SCLK 是内部假时钟，占用 GPIO13（GPIO11/12 已分给 DS3231 I2C）。 */
 #define WS2812_GPIO ((gpio_num_t)WS2812_DATA_GPIO)
-#define WS2812_SPI_SCLK_GPIO GPIO_NUM_11
+#define WS2812_SPI_SCLK_GPIO GPIO_NUM_13
 #define WS2812_SPI_HOST SPI2_HOST
 #define WS2812_SPI_HZ 2500000U
 #define WS2812_TX_TIMEOUT_MS 25U

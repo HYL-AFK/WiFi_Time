@@ -9,11 +9,14 @@ idf_component_register(
         "common/time_snapshot.c"
         "common/weather_snapshot.c"
         "drivers/wifi_manager.c"
+        "drivers/board_led.c"
         "drivers/ds3231.c"
         "drivers/radar_presence.c"
+        "drivers/switch_input.c"
         "drivers/ws2812_matrix.c"
         "middle/ble_provision.c"
         "middle/blufi_security.c"
+        "middle/http_debug.c"
         "app/app_rtc.c"
         "app/app_time.c"
         "app/app_weather.c"
@@ -29,6 +32,7 @@ idf_component_register(
         esp_driver_tsens
         esp_event
         esp_http_client
+        esp_http_server
         esp_netif
         esp_wifi
         json

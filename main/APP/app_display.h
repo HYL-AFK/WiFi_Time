@@ -34,3 +34,12 @@ void app_display_show_network_success(void);
 void app_display_show_network_failure(void);
 void app_display_show_weather_refresh_success(void);
 void app_display_show_weather_refresh_failure(void);
+
+/* 调试用：指定当前页面（0 = 主页面，1 = 闹钟页）。越界值会被忽略。 */
+void app_display_set_page(int page);
+/* 调试用：设置闹钟开关（接闹钟服务前用于验收闹钟页 UI）。 */
+void app_display_set_alarm_enabled(bool on);
+/* 调试用：设置闹钟铃声音量（1~7 档），越界值会被忽略。 */
+void app_display_set_alarm_volume(uint8_t volume);
+/* 调试用：设置语音页状态（0=idle 1=awake 2=listen 3=thinking 4=speaking 5=muted 6=unknown）。 */
+void app_display_set_voice_state(int state);

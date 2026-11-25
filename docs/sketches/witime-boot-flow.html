@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>WiTime 上电 → 待机 全流程</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+  svg { display: block; }
+  text { font-family: "KaiTi", "楷体", "STKaiti", serif; fill: #111111; }
+</style>
+</head>
+<body>
+<svg width="1240" height="3220" viewBox="0 0 1240 3220" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <filter id="ink" x="-3%" y="-3%" width="106%" height="106%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="3" result="n"/>
+      <feDisplacementMap in="SourceGraphic" in2="n" scale="1.1" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#111111"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1240" height="3220" fill="#FFFFFF"/>
+
+  <text x="60" y="62" font-size="25" font-weight="bold">WiTime 上电 → 待机 全流程</text>
+  <text x="60" y="92" font-size="12.5" fill="#444444">16 步顺序执行 · 8 个判断 · 失败只登记异常并拐回主链 · 离线路径直达待机</text>
+
+  <!-- 形状 -->
+  <g filter="url(#ink)" stroke="#111111" stroke-width="1.5" fill="#FFFFFF">
+    <rect x="555" y="120" width="150" height="44" rx="22" fill="#F4F4F4"/>
+
+    <rect x="420" y="190" width="420" height="68" rx="4"/>
+    <rect x="420" y="282" width="420" height="68" rx="4"/>
+    <path d="M630,374 L770,424 L630,474 L490,424 Z"/>
+    <rect x="60" y="390" width="310" height="68" rx="4" stroke-dasharray="6 5"/>
+
+    <rect x="420" y="500" width="420" height="68" rx="4"/>
+    <rect x="420" y="594" width="420" height="68" rx="4"/>
+    <rect x="420" y="688" width="420" height="68" rx="4"/>
+    <rect x="420" y="782" width="420" height="68" rx="4"/>
+    <rect x="420" y="876" width="420" height="68" rx="4"/>
+    <rect x="420" y="970" width="420" height="68" rx="4"/>
+
+    <path d="M630,1062 L770,1112 L630,1162 L490,1112 Z"/>
+    <rect x="60" y="1078" width="310" height="68" rx="4" stroke-dasharray="6 5"/>
+
+    <rect x="420" y="1186" width="420" height="68" rx="4"/>
+    <path d="M630,1278 L770,1328 L630,1378 L490,1328 Z"/>
+    <rect x="60" y="1294" width="310" height="68" rx="4" stroke-dasharray="6 5"/>
+
+    <rect x="420" y="1402" width="420" height="68" rx="4"/>
+    <rect x="420" y="1494" width="420" height="68" rx="4"/>
+
+    <path d="M630,1586 L770,1636 L630,1686 L490,1636 Z"/>
+    <rect x="890" y="1602" width="320" height="74" rx="4" stroke-dasharray="6 5"/>
+
+    <rect x="420" y="1710" width="420" height="68" rx="4"/>
+    <path d="M630,1802 L770,1852 L630,1902 L490,1852 Z"/>
+    <rect x="890" y="1818" width="320" height="68" rx="4" stroke-dasharray="6 5"/>
+
+    <rect x="420" y="1926" width="420" height="68" rx="4"/>
+    <path d="M630,2018 L770,2068 L630,2118 L490,2068 Z"/>
+    <rect x="890" y="2034" width="320" height="68" rx="4" stroke-dasharray="6 5"/>
+
+    <rect x="420" y="2142" width="420" height="68" rx="4"/>
+    <rect x="420" y="2234" width="420" height="68" rx="4"/>
+
+    <path d="M630,2326 L770,2376 L630,2426 L490,2376 Z"/>
+    <rect x="60" y="2342" width="310" height="68" rx="4" stroke-dasharray="6 5"/>
+
+    <rect x="420" y="2450" width="420" height="68" rx="4"/>
+    <rect x="420" y="2542" width="420" height="68" rx="4"/>
+
+    <path d="M630,2634 L770,2684 L630,2734 L490,2684 Z"/>
+    <rect x="890" y="2650" width="320" height="74" rx="4" stroke-dasharray="6 5"/>
+
+    <rect x="420" y="2758" width="420" height="68" rx="4"/>
+    <rect x="420" y="2850" width="420" height="68" rx="4"/>
+    <rect x="420" y="2942" width="420" height="68" rx="4"/>
+    <rect x="420" y="3034" width="420" height="72" rx="14" fill="#F4F4F4"/>
+
+    <rect x="890" y="2958" width="320" height="68" rx="4" stroke-dasharray="6 5"/>
+    <rect x="60" y="3136" width="760" height="60" rx="4" stroke-dasharray="6 5"/>
+  </g>
+
+  <!-- 连线 -->
+  <g filter="url(#ink)" fill="none" stroke="#111111" stroke-width="1.5">
+    <path d="M630,164 V190" marker-end="url(#arrow)"/>
+    <path d="M630,258 V282" marker-end="url(#arrow)"/>
+    <path d="M630,350 V374" marker-end="url(#arrow)"/>
+
+    <path d="M490,424 H370" marker-end="url(#arrow)"/>
+    <path d="M215,458 V534 H420" marker-end="url(#arrow)"/>
+
+    <path d="M630,474 V500" marker-end="url(#arrow)"/>
+    <path d="M630,568 V594" marker-end="url(#arrow)"/>
+    <path d="M630,662 V688" marker-end="url(#arrow)"/>
+    <path d="M630,756 V782" marker-end="url(#arrow)"/>
+    <path d="M630,850 V876" marker-end="url(#arrow)"/>
+    <path d="M630,944 V970" marker-end="url(#arrow)"/>
+    <path d="M630,1038 V1062" marker-end="url(#arrow)"/>
+
+    <path d="M490,1112 H370" marker-end="url(#arrow)"/>
+    <path d="M215,1146 H40 V1436 H420" marker-end="url(#arrow)"/>
+
+    <path d="M630,1162 V1186" marker-end="url(#arrow)"/>
+    <path d="M630,1254 V1278" marker-end="url(#arrow)"/>
+
+    <path d="M490,1328 H370" marker-end="url(#arrow)"/>
+    <path d="M215,1362 V1436 H420" marker-end="url(#arrow)"/>
+
+    <path d="M630,1378 V1402" marker-end="url(#arrow)"/>
+    <path d="M630,1470 V1494" marker-end="url(#arrow)"/>
+    <path d="M630,1562 V1586" marker-end="url(#arrow)"/>
+
+    <path d="M770,1636 H890" marker-end="url(#arrow)"/>
+    <path d="M1050,1676 V1744 H840" marker-end="url(#arrow)"/>
+    <path d="M1210,1639 H1235 V2992 H1210" marker-end="url(#arrow)"/>
+
+    <path d="M630,1686 V1710" marker-end="url(#arrow)"/>
+    <path d="M630,1778 V1802" marker-end="url(#arrow)"/>
+
+    <path d="M770,1852 H890" marker-end="url(#arrow)"/>
+    <path d="M1210,1852 H1235"/>
+
+    <path d="M630,1902 V1926" marker-end="url(#arrow)"/>
+    <path d="M630,1994 V2018" marker-end="url(#arrow)"/>
+
+    <path d="M770,2068 H890" marker-end="url(#arrow)"/>
+    <path d="M1050,2102 V2268 H840" marker-end="url(#arrow)"/>
+
+    <path d="M630,2118 V2142" marker-end="url(#arrow)"/>
+    <path d="M630,2210 V2234" marker-end="url(#arrow)"/>
+    <path d="M630,2302 V2326" marker-end="url(#arrow)"/>
+
+    <path d="M490,2376 H370" marker-end="url(#arrow)"/>
+    <path d="M215,2410 V2484 H420" marker-end="url(#arrow)"/>
+
+    <path d="M630,2426 V2450" marker-end="url(#arrow)"/>
+    <path d="M630,2518 V2542" marker-end="url(#arrow)"/>
+    <path d="M630,2610 V2634" marker-end="url(#arrow)"/>
+
+    <path d="M770,2684 H890" marker-end="url(#arrow)"/>
+    <path d="M1050,2724 V2884 H840" marker-end="url(#arrow)"/>
+
+    <path d="M630,2734 V2758" marker-end="url(#arrow)"/>
+    <path d="M630,2826 V2850" marker-end="url(#arrow)"/>
+    <path d="M630,2918 V2942" marker-end="url(#arrow)"/>
+    <path d="M630,3010 V3034" marker-end="url(#arrow)"/>
+
+    <path d="M1050,3026 V3070 H840" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- 文本：主链 -->
+  <text x="630" y="148" font-size="16" text-anchor="middle">上电</text>
+
+  <text x="442" y="212" font-size="13" font-weight="bold">① GPIO10 立即拉低</text>
+  <text x="442" y="232" font-size="10.5" fill="#333333">gpio_set_level(GPIO10, 0) · 数据线先压住</text>
+  <text x="442" y="248" font-size="10" fill="#555555">避免点阵上电瞬间随机点亮一串</text>
+
+  <text x="442" y="304" font-size="13" font-weight="bold">② nvs_flash_init()</text>
+  <text x="442" y="324" font-size="10.5" fill="#333333">装载 Wi-Fi 凭据 / P 编码表 / 固定坐标 / 音量</text>
+  <text x="442" y="340" font-size="10" fill="#555555">命名空间：wifi、app_fault、app_config</text>
+
+  <text x="630" y="429" font-size="12.5" text-anchor="middle">NVS 初始化失败？</text>
+  <text x="215" y="415" font-size="12.5" font-weight="bold" text-anchor="middle">nvs_flash_erase() 重试一次</text>
+  <text x="215" y="434" font-size="10.5" fill="#333333" text-anchor="middle">NO_FREE_PAGES / NEW_VERSION 触发</text>
+  <text x="215" y="450" font-size="10" fill="#555555" text-anchor="middle">仍失败 → 登记 P004，用默认值继续</text>
+
+  <text x="442" y="522" font-size="13" font-weight="bold">③ runtime_event_log_init()</text>
+  <text x="442" y="542" font-size="10.5" fill="#333333">写 BOOT 事件：reset_reason / free_heap / 启动次数</text>
+  <text x="442" y="558" font-size="10" fill="#555555">环形日志，供事后追重启原因</text>
+
+  <text x="442" y="616" font-size="13" font-weight="bold">④ app_fault_init()</text>
+  <text x="442" y="636" font-size="10.5" fill="#333333">读回 8 条 P 编码：active / count / first / last</text>
+  <text x="442" y="652" font-size="10" fill="#555555">等级 1 带自愈时限，等级 2 长期挂载只记录</text>
+
+  <text x="442" y="710" font-size="13" font-weight="bold">⑤ app_config_load()</text>
+  <text x="442" y="730" font-size="10.5" fill="#333333">SSID / 密码 / AP 密码 / wifi_count / 固定坐标 loc=</text>
+  <text x="442" y="746" font-size="10" fill="#555555">无配置 → 后面走 BluFi 配网分支</text>
+
+  <text x="442" y="804" font-size="13" font-weight="bold">⑥ device_name_get() → 三处统一</text>
+  <text x="442" y="824" font-size="10.5" fill="#333333">ESPARK_ + STA MAC 后 6 位</text>
+  <text x="442" y="840" font-size="10" fill="#555555">BluFi 广播名 / STA hostname / SoftAP SSID 同一个值</text>
+
+  <text x="442" y="898" font-size="13" font-weight="bold">⑦ app_display_init()</text>
+  <text x="442" y="918" font-size="10.5" fill="#333333">SPI-DMA 建通道 → 清屏 → 亮度 20%</text>
+  <text x="442" y="934" font-size="10" fill="#555555">状态灯（GPIO9）归位到 (15,15)，先清掉上电残影</text>
+
+  <text x="442" y="992" font-size="13" font-weight="bold">⑧ ds3231_init()</text>
+  <text x="442" y="1012" font-size="10.5" fill="#333333">I2C 400 kHz · GPIO11=SDA / GPIO12=SCL · 地址 0x68</text>
+  <text x="442" y="1028" font-size="10" fill="#555555">初始化失败不影响后续，只做标记</text>
+
+  <text x="630" y="1117" font-size="12.5" text-anchor="middle">I2C 应答？</text>
+  <text x="215" y="1103" font-size="12.5" font-weight="bold" text-anchor="middle">登记 P101</text>
+  <text x="215" y="1122" font-size="10.5" fill="#333333" text-anchor="middle">时间源退化为「仅 SNTP」</text>
+  <text x="215" y="1138" font-size="10" fill="#555555" text-anchor="middle">跳过 ⑨，直接到 ⑪ 显示 --:--</text>
+
+  <text x="442" y="1208" font-size="13" font-weight="bold">⑨ ds3231_read_time()</text>
+  <text x="442" y="1228" font-size="10.5" fill="#333333">读 7 字节 BCD → 转 tm → time_snapshot(from_rtc)</text>
+  <text x="442" y="1244" font-size="10" fill="#555555">记录秒进位，保证秒点每秒翻转一次</text>
+
+  <text x="630" y="1318" font-size="12.5" text-anchor="middle">RTC 时间有效？</text>
+  <text x="630" y="1336" font-size="10" fill="#555555" text-anchor="middle">年份 ≥ 2024 且秒 &lt; 60</text>
+  <text x="215" y="1319" font-size="12.5" font-weight="bold" text-anchor="middle">登记 P101</text>
+  <text x="215" y="1338" font-size="10.5" fill="#333333" text-anchor="middle">点阵先显示 --:--</text>
+  <text x="215" y="1354" font-size="10" fill="#555555" text-anchor="middle">SNTP 成功后立即可见</text>
+
+  <text x="442" y="1424" font-size="13" font-weight="bold">点阵先出 RTC 时间</text>
+  <text x="442" y="1444" font-size="10.5" fill="#333333">断网也能走：HH:MM，秒点每秒闪一次</text>
+  <text x="442" y="1460" font-size="10" fill="#555555">页面停在时钟主页，天气区先空着</text>
+
+  <text x="442" y="1516" font-size="13" font-weight="bold">⑩ wifi_manager_start()</text>
+  <text x="442" y="1536" font-size="10.5" fill="#333333">STA 模式 → 设置 hostname → 开 BluFi 广播</text>
+  <text x="442" y="1552" font-size="10" fill="#555555">未配网时同时保留 SoftAP 兜底</text>
+
+  <text x="630" y="1641" font-size="12.5" text-anchor="middle">NVS 已有 Wi-Fi 凭据？</text>
+  <text x="1050" y="1626" font-size="12.5" font-weight="bold" text-anchor="middle">BluFi 等待配网（180 s）</text>
+  <text x="1050" y="1645" font-size="10.5" fill="#333333" text-anchor="middle">手机写入 SSID / 密码 → 存 NVS</text>
+  <text x="1050" y="1662" font-size="10" fill="#555555" text-anchor="middle">成功 → 回 ⑪；超时 → 离线</text>
+
+  <text x="442" y="1732" font-size="13" font-weight="bold">⑪ wifi_connect(ssid)</text>
+  <text x="442" y="1752" font-size="10.5" fill="#333333">30 s 超时；失败退避 5 s，重试 3 次</text>
+  <text x="442" y="1768" font-size="10" fill="#555555">重试期间状态灯蓝闪，提示正在连</text>
+
+  <text x="630" y="1857" font-size="12.5" text-anchor="middle">拿到 IP？</text>
+  <text x="1050" y="1840" font-size="12.5" font-weight="bold" text-anchor="middle">连接失败</text>
+  <text x="1050" y="1859" font-size="10.5" fill="#333333" text-anchor="middle">重试 3 次仍未拿到 IP</text>
+  <text x="1050" y="1876" font-size="10" fill="#555555" text-anchor="middle">登记 P002，转离线模式</text>
+
+  <text x="442" y="1948" font-size="13" font-weight="bold">⑫ app_time_start()</text>
+  <text x="442" y="1968" font-size="10.5" fill="#333333">SNTP 首次同步，10 s 超时</text>
+  <text x="442" y="1984" font-size="10" fill="#555555">成功后设置系统时间与本地时区</text>
+
+  <text x="630" y="2073" font-size="12.5" text-anchor="middle">SNTP 同步成功？</text>
+  <text x="1050" y="2058" font-size="12.5" font-weight="bold" text-anchor="middle">每分钟重试</text>
+  <text x="1050" y="2077" font-size="10.5" fill="#333333" text-anchor="middle">期间时间源保持 RTC</text>
+  <text x="1050" y="2093" font-size="10" fill="#555555" text-anchor="middle">不阻塞后续步骤</text>
+
+  <text x="442" y="2164" font-size="13" font-weight="bold">ds3231_set_time() 回写</text>
+  <text x="442" y="2184" font-size="10.5" fill="#333333">把 SNTP 时间写进 RTC</text>
+  <text x="442" y="2200" font-size="10" fill="#555555">之后每 6 h 再校准一次</text>
+
+  <text x="442" y="2256" font-size="13" font-weight="bold">⑬ location_start()</text>
+  <text x="442" y="2276" font-size="10.5" fill="#333333">固定坐标优先（NVS loc=），否则 IP 定位</text>
+  <text x="442" y="2292" font-size="10" fill="#555555">双源：ipwho.is → ipapi.co 备用</text>
+
+  <text x="630" y="2381" font-size="12.5" text-anchor="middle">定位在中国境内？</text>
+  <text x="215" y="2367" font-size="12.5" font-weight="bold" text-anchor="middle">登记 P103</text>
+  <text x="215" y="2386" font-size="10.5" fill="#333333" text-anchor="middle">疑似代理 / VPN 出口</text>
+  <text x="215" y="2402" font-size="10" fill="#555555" text-anchor="middle">天气沿用上一次坐标</text>
+
+  <text x="442" y="2472" font-size="13" font-weight="bold">写 location_snapshot</text>
+  <text x="442" y="2492" font-size="10.5" fill="#333333">经纬度 → 天气请求参数</text>
+  <text x="442" y="2508" font-size="10" fill="#555555">同时刷新点阵定位角标</text>
+
+  <text x="442" y="2564" font-size="13" font-weight="bold">⑭ app_weather_start()</text>
+  <text x="442" y="2584" font-size="10.5" fill="#333333">GET open-meteo，10 s 超时，周期 10 min</text>
+  <text x="442" y="2600" font-size="10" fill="#555555">语音问天气可立即触发一次刷新</text>
+
+  <text x="630" y="2689" font-size="12.5" text-anchor="middle">天气请求成功？</text>
+  <text x="1050" y="2674" font-size="12.5" font-weight="bold" text-anchor="middle">沿用上次快照</text>
+  <text x="1050" y="2693" font-size="10.5" fill="#333333" text-anchor="middle">亮天气故障灯（第 2 盏红）</text>
+  <text x="1050" y="2710" font-size="10" fill="#555555" text-anchor="middle">每分钟重试，窗口结束后继续</text>
+
+  <text x="442" y="2780" font-size="13" font-weight="bold">解析 → weather_snapshot(network)</text>
+  <text x="442" y="2800" font-size="10.5" fill="#333333">温度 / 天气码 / 更新时间</text>
+  <text x="442" y="2816" font-size="10" fill="#555555">清故障灯，状态灯双闪两次</text>
+
+  <text x="442" y="2872" font-size="13" font-weight="bold">⑮ status_led_update()</text>
+  <text x="442" y="2892" font-size="10.5" fill="#333333">故障红 &gt; 配网蓝闪 &gt; 刷新青 &gt; 正常绿呼吸</text>
+  <text x="442" y="2908" font-size="10" fill="#555555">灯位从 (15,15) 起向左排，几类故障几盏灯</text>
+
+  <text x="442" y="2964" font-size="13" font-weight="bold">⑯ display_watchdog() 启动</text>
+  <text x="442" y="2984" font-size="10.5" fill="#333333">画面 10 s 无刷新 → 登记 P003</text>
+  <text x="442" y="3000" font-size="10" fill="#555555">P003 持续 10 min → 自动重启自愈</text>
+
+  <text x="630" y="3064" font-size="15" font-weight="bold" text-anchor="middle">进入待机 · 主界面</text>
+  <text x="630" y="3086" font-size="10.5" fill="#333333" text-anchor="middle">时钟 + 天气 + 状态灯呼吸；事件队列开始分发（语音 / 开关 / 雷达 / 计时）</text>
+
+  <text x="1050" y="2984" font-size="13" font-weight="bold" text-anchor="middle">离线模式</text>
+  <text x="1050" y="3003" font-size="10.5" fill="#333333" text-anchor="middle">跳过 ⑫ ~ ⑯ 的联网步骤</text>
+  <text x="1050" y="3019" font-size="10" fill="#555555" text-anchor="middle">RTC 走时 + 语音 / 开关 / 雷达照常，每小时后台重连</text>
+
+  <!-- 是 / 否 -->
+  <text x="642" y="492" font-size="12">是</text>
+  <text x="476" y="416" font-size="12">否</text>
+  <text x="642" y="1181" font-size="12">是</text>
+  <text x="476" y="1104" font-size="12">否</text>
+  <text x="642" y="1396" font-size="12">是</text>
+  <text x="470" y="1320" font-size="12">否</text>
+  <text x="642" y="1705" font-size="12">是</text>
+  <text x="786" y="1628" font-size="12">否</text>
+  <text x="642" y="1921" font-size="12">是</text>
+  <text x="786" y="1844" font-size="12">否</text>
+  <text x="642" y="2137" font-size="12">是</text>
+  <text x="786" y="2060" font-size="12">否</text>
+  <text x="642" y="2445" font-size="12">是</text>
+  <text x="470" y="2368" font-size="12">否</text>
+  <text x="642" y="2753" font-size="12">是</text>
+  <text x="786" y="2676" font-size="12">否</text>
+
+  <!-- 底部说明 -->
+  <text x="80" y="3160" font-size="12.5" font-weight="bold">判断约定</text>
+  <text x="80" y="3182" font-size="11.5" fill="#333333">所有「否」分支只登记异常 + 记录日志，不 return、不阻塞主链；等级 1 到点未恢复才由自愈机制重启。</text>
+
+  <text x="60" y="3210" font-size="11" fill="#666666">注：本图为设计蓝图，未实现步骤按目标行为绘制；P 编码沿用现有 8 条定义，新增异常需先登记编码。</text>
+</svg>
+</body>
+</html>

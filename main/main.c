@@ -23,7 +23,9 @@
 #include "radar_presence.h"
 #include "wifi_manager.h"
 #include "ws2812_matrix.h"
+#include "board_led.h"
 #include "ble_provision.h"
+#include "http_debug.h"
 #include "driver/gpio.h"
 
 static const char *TAG = "witime";
@@ -190,6 +192,18 @@ void app_main(void)
         return;
     }
     ble_provision_init(&cfg, apply_wifi_cfg);
+
+    /* 局域网调试接口：手机浏览器打开设备 IP 即可切页面（调试期用，量产前关闭）。 */
+    err = http_debug_start();
+    if (err != ESP_OK) {
+        APP_LOG_ERR(TAG, err, "debug http start failed; continuing without it");
+    }
+
+    /* 板载 WS2812 状态灯：正常绿灯 300ms 亮/700ms 灭，异常红灯常亮。 */
+    err = board_led_init();
+    if (err != ESP_OK) {
+        APP_LOGW(TAG, "board led init failed; continuing without status light");
+    }
 
     if (cfg.has_wifi && cfg.wifi_count > 0) {
         wifi_manager_connect_sta(&cfg);
